@@ -44,7 +44,9 @@ def filter_jsonl(
             total += 1
             obj = json.loads(line)
 
-            t = obj.get("qwen3vl_correct_original", obj.get("tinyllava_correct_original", None))
+            t = obj.get("llava15_correct_original",
+                        obj.get("qwen3vl_correct_original",
+                                obj.get("tinyllava_correct_original", None)))
             b = obj.get("blip_correct_original", None)
             if require_fields and (t is None or b is None):
                 continue
