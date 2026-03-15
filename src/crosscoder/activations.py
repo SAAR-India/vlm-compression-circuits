@@ -10,6 +10,7 @@ from transformers import (
     AutoProcessor,
     BlipForQuestionAnswering,
     BlipProcessor,
+    LlavaForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
 
@@ -117,7 +118,7 @@ def load_uncompressed_model(model_name: str) -> Tuple:
             low_cpu_mem_usage=True,
         ).to(device)
         processor = BlipProcessor.from_pretrained(config.BLIP_VQA_MODEL_ID)
-    else:
+    elif model_name == "qwen3vl":
         # qwen3vl: Qwen3-VL-2B-Instruct
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             config.QWEN3VL_2B_MODEL_ID,
@@ -125,6 +126,15 @@ def load_uncompressed_model(model_name: str) -> Tuple:
             low_cpu_mem_usage=True,
         ).to(device)
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
+        if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+            processor.tokenizer.padding_side = "left"
+    else:
+        model = LlavaForConditionalGeneration.from_pretrained(
+            config.LLAVA15_7B_MODEL_ID,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        ).to(device)
+        processor = AutoProcessor.from_pretrained(config.LLAVA15_7B_MODEL_ID, use_fast=False)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
     model.eval()
@@ -156,7 +166,7 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
         model.load_state_dict(state_dict, strict=False)
         model = model.to(device)
         processor = BlipProcessor.from_pretrained(config.BLIP_VQA_MODEL_ID)
-    else:
+    elif model_name == "qwen3vl":
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             config.QWEN3VL_2B_MODEL_ID,
             torch_dtype=torch.float16,
@@ -165,6 +175,17 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
         model.load_state_dict(state_dict, strict=False)
         model = model.to(device)
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
+        if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+            processor.tokenizer.padding_side = "left"
+    else:
+        model = LlavaForConditionalGeneration.from_pretrained(
+            config.LLAVA15_7B_MODEL_ID,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        )
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        processor = AutoProcessor.from_pretrained(config.LLAVA15_7B_MODEL_ID, use_fast=False)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
 
@@ -349,11 +370,17 @@ def extract_activations_for_config(
     print("Extracting activations (batched)...")
     for i in tqdm(range(0, len(items), batch_size), desc="Processing batches"):
         batch_items = items[i:i + batch_size]
-        if model_name == "blip2":
+        if model_name in {"blip2", "llava15"}:
             images = [it["image"] for it in batch_items]
             questions = [it["question"] for it in batch_items]
-            inputs_u = processor_u(images=images, text=questions, return_tensors="pt", padding=True)
-            inputs_c = processor_c(images=images, text=questions, return_tensors="pt", padding=True)
+            if model_name == "blip2":
+                texts_u = questions
+                texts_c = questions
+            else:
+                texts_u = [f"USER: <image>\n{q}\nASSISTANT:" for q in questions]
+                texts_c = texts_u
+            inputs_u = processor_u(images=images, text=texts_u, return_tensors="pt", padding=True)
+            inputs_c = processor_c(images=images, text=texts_c, return_tensors="pt", padding=True)
             inputs_u = {k: v.to(device) for k, v in inputs_u.items()}
             inputs_c = {k: v.to(device) for k, v in inputs_c.items()}
             extractor_u.clear()
@@ -479,11 +506,17 @@ def extract_activations_for_vp_config(
     print("Extracting activations for V+P (batched)...")
     for i in tqdm(range(0, len(items), batch_size), desc="Processing batches"):
         batch_items = items[i:i + batch_size]
-        if model_name == "blip2":
+        if model_name in {"blip2", "llava15"}:
             images = [it["image"] for it in batch_items]
             questions = [it["question"] for it in batch_items]
-            inputs_u = processor_u(images=images, text=questions, return_tensors="pt", padding=True)
-            inputs_c = processor_c(images=images, text=questions, return_tensors="pt", padding=True)
+            if model_name == "blip2":
+                texts_u = questions
+                texts_c = questions
+            else:
+                texts_u = [f"USER: <image>\n{q}\nASSISTANT:" for q in questions]
+                texts_c = texts_u
+            inputs_u = processor_u(images=images, text=texts_u, return_tensors="pt", padding=True)
+            inputs_c = processor_c(images=images, text=texts_c, return_tensors="pt", padding=True)
             inputs_u = {k: v.to(device) for k, v in inputs_u.items()}
             inputs_c = {k: v.to(device) for k, v in inputs_c.items()}
             extractor_u.clear()

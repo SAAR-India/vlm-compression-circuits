@@ -336,7 +336,7 @@ Examples:
         """
     )
     
-    parser.add_argument("--model", type=str, choices=config.MODELS, help="Model name (blip2 or qwen3vl)")
+    parser.add_argument("--model", type=str, choices=config.MODELS, help="Model name (blip2, qwen3vl, or llava15)")
     parser.add_argument("--method", type=str, choices=config.METHODS, help="Compression method (wanda or awq)")
     parser.add_argument("--component", type=str, choices=config.COMPONENTS, help="Component (V, P, or V_P)")
     parser.add_argument("--token_type", type=str, choices=config.TOKEN_TYPES, default="cls", help="Token type for vision encoder (cls or patch)")
