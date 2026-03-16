@@ -30,13 +30,13 @@ TOPK_CLS = 400
 TOPK_PATCH = 400
 TOPK_PROJECTOR = 400
 
-EXPANSION_FACTOR_VISION = 4 # total neurons in SAE is 768 * 4 = 3072
-EXPANSION_FACTOR_PROJECTOR = 4 # total neurons in SAE  768 * 4 = 3072
+EXPANSION_FACTOR_VISION = 4
+EXPANSION_FACTOR_PROJECTOR = 4
 
 FVE_THRESHOLD = 0.5
 DEAD_NEURON_THRESHOLD = 1
 
-# Adapts according to experiment-wise rho and theta
+# GMM fallback when rho distribution is degenerate; theta thresholds (fixed)
 RHO_UNCOMPRESSED_ONLY = 0.15
 RHO_COMPRESSED_ONLY = 0.85
 RHO_SHARED_LOW = 0.35
@@ -52,7 +52,11 @@ AWQ_CALIBRATION_SAMPLES = 256
 
 BLIP_VQA_MODEL_ID = "Salesforce/blip-vqa-base"
 QWEN3VL_2B_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
+<<<<<<< master
+LLAVA_V1_5_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+=======
 LLAVA15_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+>>>>>>> main
 
 MODULE_MAP = {
     "blip2": {

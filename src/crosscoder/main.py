@@ -96,7 +96,12 @@ def run_analyze(model: str, method: str, component: str, token_type: str):
         merge_classification_with_cf,
         save_cf_results,
     )
-    from .metrics import compute_all_primary_metrics, save_metrics
+    from .metrics import (
+        compute_all_primary_metrics,
+        get_shared_features_geometry_df,
+        save_metrics,
+        summarize_shared_geometry,
+    )
     from .superposition import analyze_all_compressed_only_features, save_superposition_results
     from .train import compute_all_feature_activations, load_trained_crosscoder
 
@@ -150,6 +155,18 @@ def run_analyze(model: str, method: str, component: str, token_type: str):
         crosscoder, classification_df, feature_activations, method
     )
     save_superposition_results(superposition_results, features_dir / "superposition_analysis.json")
+
+    decoder_weights = crosscoder.get_decoder_weights()
+    shared_geometry = summarize_shared_geometry(
+        classification_df, decoder_weights["W_u_dec"], decoder_weights["W_c_dec"]
+    )
+    save_json(shared_geometry, metrics_dir / "shared_geometry_metrics.json")
+
+    shared_geom_df = get_shared_features_geometry_df(
+        classification_df, decoder_weights["W_u_dec"], decoder_weights["W_c_dec"]
+    )
+    if len(shared_geom_df) > 0:
+        shared_geom_df.to_csv(features_dir / "shared_features_geometry.csv", index=False)
     
     print("Computing aggregate metrics...")
     training_history = load_json(metrics_dir / "training_metrics.json")
@@ -163,12 +180,15 @@ def run_analyze(model: str, method: str, component: str, token_type: str):
     print(f"  - Feature classification: {features_dir / 'feature_classification.csv'}")
     print(f"  - CF scores: {features_dir / 'counterfactual_scores.csv'}")
     print(f"  - Superposition: {features_dir / 'superposition_analysis.json'}")
+    print(f"  - Shared geometry metrics: {metrics_dir / 'shared_geometry_metrics.json'}")
+    if len(shared_geom_df) > 0:
+        print(f"  - Shared features geometry: {features_dir / 'shared_features_geometry.csv'}")
     print(f"  - Aggregate metrics: {metrics_dir / 'aggregate_metrics.json'}")
     
     print("\nAnalysis complete!")
 
 
-def run_visualize(model: str, method: str, component: str, token_type: str):
+def run_visualize(model: str, method: str, component: str, token_type: str, force: bool = False):
     from .visualize import generate_all_plots
     import pandas as pd
 
@@ -182,8 +202,8 @@ def run_visualize(model: str, method: str, component: str, token_type: str):
     plots_dir = get_plots_dir(results_dir)
 
     loss_curves_path = plots_dir / "loss_curves.png"
-    if loss_curves_path.exists():
-        print(f"Plots already exist at {plots_dir}, skipping visualization.")
+    if loss_curves_path.exists() and not force:
+        print(f"Plots already exist at {plots_dir}, skipping visualization. Use --force to regenerate.")
         return
 
     training_history = load_json(metrics_dir / "training_metrics.json")
@@ -203,11 +223,11 @@ def run_visualize(model: str, method: str, component: str, token_type: str):
     print("Visualization complete!")
 
 
-def run_all(model: str, method: str, component: str, token_type: str):
+def run_all(model: str, method: str, component: str, token_type: str, force: bool = False):
     run_extract(model, method, component, token_type)
     run_train(model, method, component, token_type)
     run_analyze(model, method, component, token_type)
-    run_visualize(model, method, component, token_type)
+    run_visualize(model, method, component, token_type, force=force)
 
 
 def run_all_configurations():
@@ -341,9 +361,11 @@ Examples:
     parser.add_argument("--component", type=str, choices=config.COMPONENTS, help="Component (V, P, or V_P)")
     parser.add_argument("--token_type", type=str, choices=config.TOKEN_TYPES, default="cls", help="Token type for vision encoder (cls or patch)")
     parser.add_argument("--stage", type=str, required=True,
-                       choices=["extract", "train", "analyze", "visualize", "all", 
+                       choices=["extract", "train", "analyze", "visualize", "all",
                                "all_configs", "hypothesis_tests"],
                        help="Stage to run")
+    parser.add_argument("--force", action="store_true",
+                       help="Force regeneration (e.g. overwrite existing plots)")
     
     args = parser.parse_args()
     
@@ -367,9 +389,9 @@ Examples:
     elif args.stage == "analyze":
         run_analyze(args.model, args.method, args.component, args.token_type)
     elif args.stage == "visualize":
-        run_visualize(args.model, args.method, args.component, args.token_type)
+        run_visualize(args.model, args.method, args.component, args.token_type, force=args.force)
     elif args.stage == "all":
-        run_all(args.model, args.method, args.component, args.token_type)
+        run_all(args.model, args.method, args.component, args.token_type, force=args.force)
 
 
 if __name__ == "__main__":
