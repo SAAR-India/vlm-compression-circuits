@@ -1,7 +1,7 @@
 """
-Vision + projector compression (Wanda, AWQ) for BLIP-VQA and Qwen3-VL-2B.
-Models from preprocessing/config.py: BLIP_VQA_MODEL_ID (blip-vqa-base), QWEN3VL_2B_MODEL_ID.
-Q-VLM is separate: python src/run_qvlm_compression.py --model qwen3vl --combo V+P
+Vision + projector compression (Wanda, AWQ) for BLIP-VQA, Qwen3-VL-2B, and LLaVA-1.5-7B.
+Models from preprocessing/config.py: BLIP_VQA_MODEL_ID, QWEN3VL_2B_MODEL_ID, LLAVA15_7B_MODEL_ID.
+Q-VLM is separate: python src/run_qvlm_compression.py --model llava15 --combo V+P
 
 Usage:
     python src/run_compression_eval.py --stage compress
@@ -35,7 +35,7 @@ from tabulate import tabulate
 
 # Model IDs from preprocessing/config.py
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from preprocessing.config import BLIP_VQA_MODEL_ID, QWEN3VL_2B_MODEL_ID
+from preprocessing.config import BLIP_VQA_MODEL_ID, LLAVA15_7B_MODEL_ID, QWEN3VL_2B_MODEL_ID
 
 COMP_V = "vision"
 COMP_P = "projector"
@@ -50,6 +50,10 @@ MODULE_MAP = {
     "qwen3vl": {
         COMP_V: "model.visual",
         COMP_P: "model.visual.merger",
+    },
+    "llava15": {
+        COMP_V: "model.vision_tower",
+        COMP_P: "model.multi_modal_projector",
     },
 }
 
@@ -76,6 +80,11 @@ MODEL_CONFIGS = {
     "qwen3vl": {
         "model_id": QWEN3VL_2B_MODEL_ID,
         "model_class": "Qwen3VLForConditionalGeneration",
+        "processor_class": "AutoProcessor",
+    },
+    "llava15": {
+        "model_id": LLAVA15_7B_MODEL_ID,
+        "model_class": "LlavaForConditionalGeneration",
         "processor_class": "AutoProcessor",
     },
 }
@@ -185,13 +194,20 @@ def load_model(model_name: str):
             low_cpu_mem_usage=True, device_map=device_map,
         )
         processor = BlipProcessor.from_pretrained(cfg["model_id"])
-    else:
+    elif model_name == "qwen3vl":
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             cfg["model_id"], torch_dtype=torch.float16,
             low_cpu_mem_usage=True, device_map=device_map,
         )
         processor = AutoProcessor.from_pretrained(cfg["model_id"])
+    else:
+        from transformers import AutoProcessor, LlavaForConditionalGeneration
+        model = LlavaForConditionalGeneration.from_pretrained(
+            cfg["model_id"], torch_dtype=torch.float16,
+            low_cpu_mem_usage=True, device_map=device_map,
+        )
+        processor = AutoProcessor.from_pretrained(cfg["model_id"], use_fast=False)
 
     return model, processor
 
@@ -416,7 +432,7 @@ def run_compression(quick: bool = False):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     log = load_log()
 
-    models = ["qwen3vl"] if quick else list(MODEL_CONFIGS.keys())
+    models = ["llava15"] if quick else list(MODEL_CONFIGS.keys())
     methods = ["wanda"] if quick else METHODS
     combos = {"V": COMPONENT_COMBOS["V"]} if quick else COMPONENT_COMBOS
 
@@ -1002,7 +1018,7 @@ def load_model_and_processor_for_eval(
             model.load_state_dict(converted, strict=True)
             processor = BlipProcessor.from_pretrained(model_path)
             build_prompt = build_prompt_blip2
-        else:
+        elif model_name == "qwen3vl":
             from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
             model = Qwen3VLForConditionalGeneration.from_pretrained(
                 base_model_id, torch_dtype=torch.float16,
@@ -1011,7 +1027,16 @@ def load_model_and_processor_for_eval(
             model.load_state_dict(converted, strict=True)
             processor = AutoProcessor.from_pretrained(model_path)
             build_prompt = build_prompt_qwen3vl
-        if model_name == "qwen3vl":
+        else:
+            from transformers import AutoProcessor, LlavaForConditionalGeneration
+            model = LlavaForConditionalGeneration.from_pretrained(
+                base_model_id, torch_dtype=torch.float16,
+                low_cpu_mem_usage=True, device_map=device_map,
+            )
+            model.load_state_dict(converted, strict=True)
+            processor = AutoProcessor.from_pretrained(model_path, use_fast=False)
+            build_prompt = build_prompt_qwen3vl
+        if model_name in {"qwen3vl", "llava15"}:
             processor.tokenizer.padding_side = "left"
         return model, processor, build_prompt
 
@@ -1025,7 +1050,7 @@ def load_model_and_processor_for_eval(
             MODEL_CONFIGS["blip2"]["model_id"]
         )
         build_prompt = build_prompt_blip2
-    else:
+    elif model_name == "qwen3vl":
         from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             model_path, torch_dtype=torch.float16,
@@ -1035,7 +1060,18 @@ def load_model_and_processor_for_eval(
             MODEL_CONFIGS["qwen3vl"]["model_id"],
         )
         build_prompt = build_prompt_qwen3vl
-    if model_name == "qwen3vl":
+    else:
+        from transformers import AutoProcessor, LlavaForConditionalGeneration
+        model = LlavaForConditionalGeneration.from_pretrained(
+            model_path, torch_dtype=torch.float16,
+            low_cpu_mem_usage=True, device_map=device_map,
+        )
+        processor = AutoProcessor.from_pretrained(
+            MODEL_CONFIGS["llava15"]["model_id"],
+            use_fast=False,
+        )
+        build_prompt = build_prompt_qwen3vl
+    if model_name in {"qwen3vl", "llava15"}:
         processor.tokenizer.padding_side = "left"  # decoder-only: correct batched generation
     return model, processor, build_prompt
 
@@ -1193,7 +1229,7 @@ def run_evaluation(quick: bool = False, batch_size: int = 64):
     datasets_to_eval = EVAL_DATASETS_LITE if quick else EVAL_DATASETS
     limit = 50 if quick else 0  # 0 = full dataset
 
-    models = ["qwen3vl", "blip2"] if quick else list(MODEL_CONFIGS.keys())
+    models = ["llava15", "blip2"] if quick else list(MODEL_CONFIGS.keys())
     methods_list = ["wanda"] if quick else METHODS
     combos = {"V": COMPONENT_COMBOS["V"]} if quick else COMPONENT_COMBOS
 
@@ -1336,7 +1372,7 @@ def _template():
     header = ["Model", "Method", "Components"]
     header += list(EVAL_DATASETS.keys())
     rows = []
-    for model in ["blip2", "qwen3vl"]:
+    for model in ["blip2", "qwen3vl", "llava15"]:
         rows.append([model, "FP16", "—"] + ["—"] * len(EVAL_DATASETS))
         for method in ["wanda", "awq"]:
             for comp in ["V", "V_P"]:

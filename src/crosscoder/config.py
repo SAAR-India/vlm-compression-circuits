@@ -52,7 +52,11 @@ AWQ_CALIBRATION_SAMPLES = 256
 
 BLIP_VQA_MODEL_ID = "Salesforce/blip-vqa-base"
 QWEN3VL_2B_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
+<<<<<<< master
 LLAVA_V1_5_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+=======
+LLAVA15_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+>>>>>>> main
 
 MODULE_MAP = {
     "blip2": {
@@ -63,16 +67,22 @@ MODULE_MAP = {
         "vision": "model.visual",
         "projector": "model.visual.merger",
     },
+    "llava15": {
+        "vision": "model.vision_tower",
+        "projector": "model.multi_modal_projector",
+    },
 }
 
 VISION_HOOK_PATHS = {
     "blip2": "vision_model.encoder.layers",
     "qwen3vl": "model.visual.blocks",
+    "llava15": "model.vision_tower.vision_model.encoder.layers",
 }
 
 PROJECTOR_HOOK_PATHS = {
     "blip2": "text_encoder.encoder.layer",
     "qwen3vl": "model.visual.merger",
+    "llava15": "model.multi_modal_projector",
 }
 
 BLIP_CROSS_ATTENTION_LAYERS = [9, 10, 11]
@@ -80,9 +90,10 @@ BLIP_CROSS_ATTENTION_LAYERS = [9, 10, 11]
 ACTIVATION_DIM = {
     "blip2": {"vision": 768, "projector": 768},
     "qwen3vl": {"vision": 1024, "projector": 2048},
+    "llava15": {"vision": 1024, "projector": 4096},
 }
 
-MODELS = ["blip2", "qwen3vl"]
+MODELS = ["blip2", "qwen3vl", "llava15"]
 METHODS = ["wanda", "awq"]
 COMPONENTS = ["V", "P", "V_P"]
 TOKEN_TYPES = ["cls", "patch"]

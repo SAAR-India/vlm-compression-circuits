@@ -34,15 +34,17 @@ VAL_FRACTION = 0.2
 RANDOM_SEED = 42
 
 # Model IDs for inference (Section 1)
-# Qwen3-VL-2B Instruct (official): vision-language model for VQA and captioning.
+# Qwen3-VL-2B Instruct: current default lightweight multimodal model.
 QWEN3VL_2B_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
+# LLaVA-1.5-7B: optional larger model for compatibility experiments.
+LLAVA15_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
 BLIP2_MODEL_ID = "Salesforce/blip2-opt-2.7b"
 
 # Dataset-specific inference models
 # Visual-Counterfact is a VQA task: use a VQA-trained BLIP checkpoint.
 BLIP_VQA_MODEL_ID = "Salesforce/blip-vqa-base"
 
-# Backward compatibility aliases (same model as QWEN3VL_2B_MODEL_ID).
+# Backward compatibility aliases (kept mapped to Qwen3-VL for existing scripts).
 TINYLLAVA_MODEL_ID = QWEN3VL_2B_MODEL_ID
 TINYLLAVA_V1_MODEL_ID = QWEN3VL_2B_MODEL_ID
 
