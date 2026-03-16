@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -205,12 +207,16 @@ def create_crosscoder(
     model_name: str,
     component: str,
     token_type: str,
+    expansion_factor: Optional[int] = None,
+    topk: Optional[int] = None,
 ) -> SPARCCrossCoder:
     from .utils import get_activation_dim, get_expansion_factor, get_topk_for_token_type
     
     input_dim = get_activation_dim(model_name, component)
-    expansion_factor = get_expansion_factor(component)
-    topk = get_topk_for_token_type(token_type, component)
+    if expansion_factor is None:
+        expansion_factor = get_expansion_factor(component)
+    if topk is None:
+        topk = get_topk_for_token_type(token_type, component)
     
     return SPARCCrossCoder(
         input_dim=input_dim,

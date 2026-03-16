@@ -10,6 +10,7 @@ from transformers import (
     AutoProcessor,
     BlipForQuestionAnswering,
     BlipProcessor,
+    LlavaForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
 )
 
@@ -117,8 +118,7 @@ def load_uncompressed_model(model_name: str) -> Tuple:
             low_cpu_mem_usage=True,
         ).to(device)
         processor = BlipProcessor.from_pretrained(config.BLIP_VQA_MODEL_ID)
-    else:
-        # qwen3vl: Qwen3-VL-2B-Instruct
+    elif model_name == "qwen3vl":
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             config.QWEN3VL_2B_MODEL_ID,
             torch_dtype=torch.float16,
@@ -127,6 +127,17 @@ def load_uncompressed_model(model_name: str) -> Tuple:
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
+    elif model_name == "llava":
+        model = LlavaForConditionalGeneration.from_pretrained(
+            config.LLAVA_V1_5_7B_MODEL_ID,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        ).to(device)
+        processor = AutoProcessor.from_pretrained(config.LLAVA_V1_5_7B_MODEL_ID)
+        if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+            processor.tokenizer.padding_side = "left"
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
     model.eval()
     return model, processor
 
@@ -156,7 +167,7 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
         model.load_state_dict(state_dict, strict=False)
         model = model.to(device)
         processor = BlipProcessor.from_pretrained(config.BLIP_VQA_MODEL_ID)
-    else:
+    elif model_name == "qwen3vl":
         model = Qwen3VLForConditionalGeneration.from_pretrained(
             config.QWEN3VL_2B_MODEL_ID,
             torch_dtype=torch.float16,
@@ -167,6 +178,19 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
+    elif model_name == "llava":
+        model = LlavaForConditionalGeneration.from_pretrained(
+            config.LLAVA_V1_5_7B_MODEL_ID,
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True,
+        )
+        model.load_state_dict(state_dict, strict=False)
+        model = model.to(device)
+        processor = AutoProcessor.from_pretrained(config.LLAVA_V1_5_7B_MODEL_ID)
+        if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
+            processor.tokenizer.padding_side = "left"
+    else:
+        raise ValueError(f"Unknown model: {model_name}")
 
     model.eval()
     return model, processor

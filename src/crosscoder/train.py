@@ -70,11 +70,15 @@ def train_crosscoder(
     batch_size: int = config.BATCH_SIZE,
     learning_rate: float = config.LEARNING_RATE,
     checkpoint_every: int = config.CHECKPOINT_EVERY,
+    results_dir: Optional[Path] = None,
+    expansion_factor: Optional[int] = None,
+    topk: Optional[int] = None,
 ) -> Dict:
     set_seed()
     device = get_device()
     
-    results_dir = get_results_dir(model_name, method, component, token_type)
+    if results_dir is None:
+        results_dir = get_results_dir(model_name, method, component, token_type)
     checkpoint_dir = get_checkpoint_dir(results_dir)
     metrics_dir = get_metrics_dir(results_dir)
     
@@ -95,7 +99,11 @@ def train_crosscoder(
         collate_fn=collate_activations,
     )
     
-    crosscoder = create_crosscoder(model_name, component, token_type)
+    crosscoder = create_crosscoder(
+        model_name, component, token_type,
+        expansion_factor=expansion_factor,
+        topk=topk,
+    )
     crosscoder = crosscoder.to(device)
     
     optimizer = AdamW(crosscoder.parameters(), lr=learning_rate, weight_decay=config.WEIGHT_DECAY)

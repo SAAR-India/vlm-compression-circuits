@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from scipy.ndimage import gaussian_filter1d
-from scipy.signal import find_peaks
+from scipy.optimize import brentq
+from scipy.stats import norm
+from sklearn.mixture import GaussianMixture
 
 from . import config
 
@@ -44,73 +45,153 @@ def _apply_iclr_style(ax: plt.Axes) -> None:
     ax.tick_params(axis="both", which="major", size=5, width=1.25)
 
 
+def _gmm_boundary_1d(
+    pi1: float,
+    mu1: float,
+    sigma1: float,
+    pi2: float,
+    mu2: float,
+    sigma2: float,
+    low: float = 0.0,
+    high: float = 1.0,
+) -> float:
+    """
+    Find x where pi1*N(x|mu1,sigma1) = pi2*N(x|mu2,sigma2).
+    Returns the root in [low, high], or midpoint if brentq fails.
+    """
+    def f(x: float) -> float:
+        return pi1 * norm.pdf(x, mu1, sigma1) - pi2 * norm.pdf(x, mu2, sigma2)
+
+    # Ensure bracket spans the region between means
+    a = max(low, min(mu1, mu2) - 0.01)
+    b = min(high, max(mu1, mu2) + 0.01)
+    if a >= b:
+        a, b = low, high
+
+    try:
+        return float(brentq(f, a, b))
+    except (ValueError, RuntimeError):
+        return float((mu1 + mu2) / 2)
+
+
+def _config_threshold_defaults() -> Dict[str, float]:
+    """Fallback when GMM cannot be fit (e.g. empty or degenerate rho)."""
+    return {
+        "rho_uncompressed_only": config.RHO_UNCOMPRESSED_ONLY,
+        "rho_compressed_only": config.RHO_COMPRESSED_ONLY,
+        "rho_shared_low": config.RHO_SHARED_LOW,
+        "rho_shared_high": config.RHO_SHARED_HIGH,
+    }
+
+
 def compute_adaptive_rho_thresholds(
     classification_df: pd.DataFrame,
-    n_bins: int = 60,
-    smooth_sigma: float = 1.5,
-    min_prominence_frac: float = 0.03,
+    n_components_range: tuple = (1, 4),
+    covariance_type: str = "diag",
+    min_samples: int = 30,
 ) -> Dict[str, float]:
     """
-    Estimate rho thresholds from the empirical distribution (trimodal: ~0.5, ~0.8, ~1.0).
-    Returns boundaries for uncompressed-only (upper), shared (low, high), and compressed-only (lower).
-    Falls back to config defaults if peak/valley detection is unclear.
+    Compute GMM-based rho thresholds for feature classification.
+    Uses a Gaussian Mixture Model with BIC model selection on the rho distribution.
+    Returns boundaries for uncompressed-only, shared (low, high), and compressed-only.
+    Falls back to config defaults when GMM cannot be fit (e.g. degenerate rho).
+    Used by feature_classification.csv, plots, and all evaluation.
     """
     rho = np.asarray(classification_df["rho"].values, dtype=float)
     rho = rho[(rho >= 0) & (rho <= 1)]
     if len(rho) == 0:
+        return _config_threshold_defaults()
+
+    rho_2d = rho.reshape(-1, 1)
+    if len(rho) < min_samples:
+        p25, p75 = np.percentile(rho, [25, 75])
         return {
-            "rho_uncompressed_only": config.RHO_UNCOMPRESSED_ONLY,
-            "rho_compressed_only": config.RHO_COMPRESSED_ONLY,
-            "rho_shared_low": config.RHO_SHARED_LOW,
-            "rho_shared_high": config.RHO_SHARED_HIGH,
+            "rho_uncompressed_only": float(np.clip(p25 * 0.6, 0.05, 0.35)),
+            "rho_compressed_only": float(np.clip(p75 + (1 - p75) * 0.5, 0.65, 0.98)),
+            "rho_shared_low": float(np.percentile(rho, 40)),
+            "rho_shared_high": float(np.percentile(rho, 75)),
         }
-    hist, bin_edges = np.histogram(rho, bins=n_bins, range=(0.0, 1.0))
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
-    smoothed = gaussian_filter1d(hist.astype(float), smooth_sigma, mode="nearest")
-    prominence = max(smoothed.max() * min_prominence_frac, 1.0)
-    peak_idx, _ = find_peaks(smoothed, prominence=prominence, distance=3)
-    valley_idx, _ = find_peaks(-smoothed, prominence=prominence, distance=3)
-    peak_pos = sorted(bin_centers[peak_idx].tolist())
-    valley_pos = sorted(bin_centers[valley_idx].tolist())
-    # Use percentiles as fallback / sanity
-    p10, p25, p50, p75, p90 = np.percentile(rho, [10, 25, 50, 75, 90])
-    # Decide boundaries from valleys; expect trimodal: peak ~0.5, ~0.8, ~1.0 → two valleys between them
-    if len(valley_pos) >= 2 and len(peak_pos) >= 2:
-        # Uncompressed-only: below first valley; compressed-only: above last valley
-        rho_u = float(valley_pos[0])
-        rho_c = float(valley_pos[-1])
-        # Shared: between first and last valley (middle band)
-        rho_shared_low = float(valley_pos[0])
-        rho_shared_high = float(valley_pos[-1])
-        if len(valley_pos) >= 3:
-            rho_shared_low = float(valley_pos[1])
-            rho_shared_high = float(valley_pos[-2])
-        # Clamp to sensible ranges
-        rho_u = min(rho_u, 0.4)
-        rho_c = max(rho_c, 0.5)
-        if rho_shared_low >= rho_shared_high:
-            rho_shared_low = p25
-            rho_shared_high = p75
+
+    # Model selection via BIC
+    best_bic = np.inf
+    best_gmm = None
+    for k in range(n_components_range[0], n_components_range[1] + 1):
+        gmm = GaussianMixture(
+            n_components=k,
+            covariance_type=covariance_type,
+            random_state=42,
+            n_init=3,
+            reg_covar=1e-4,
+        )
+        gmm.fit(rho_2d)
+        bic = gmm.bic(rho_2d)
+        if bic < best_bic:
+            best_bic = bic
+            best_gmm = gmm
+
+    if best_gmm is None:
+        return _config_threshold_defaults()
+
+    k = best_gmm.n_components
+    means = best_gmm.means_.flatten()
+    weights = best_gmm.weights_
+    if covariance_type == "full":
+        sigmas = np.sqrt(np.maximum(best_gmm.covariances_.flatten(), 1e-8))
+    else:
+        sigmas = np.sqrt(np.maximum(best_gmm.covariances_.flatten(), 1e-8))
+
+    # Sort components by mean (left = uncompressed, right = compressed)
+    order = np.argsort(means)
+    means = means[order]
+    weights = weights[order]
+    sigmas = sigmas[order]
+
+    p25, p75 = np.percentile(rho, [25, 75])
+
+    if k == 1:
         return {
-            "rho_uncompressed_only": rho_u,
-            "rho_compressed_only": rho_c,
-            "rho_shared_low": rho_shared_low,
-            "rho_shared_high": rho_shared_high,
+            "rho_uncompressed_only": float(np.clip(p25 * 0.6, 0.05, 0.35)),
+            "rho_compressed_only": float(np.clip(p75 + (1 - p75) * 0.5, 0.65, 0.98)),
+            "rho_shared_low": float(np.percentile(rho, 40)),
+            "rho_shared_high": float(np.percentile(rho, 75)),
         }
-    # Fallback: use percentiles aligned to trimodal idea (peak ~0.5, ~0.8, ~1.0)
+
+    # Compute boundaries between adjacent components
+    boundaries: List[float] = []
+    for i in range(k - 1):
+        b = _gmm_boundary_1d(
+            weights[i], means[i], sigmas[i],
+            weights[i + 1], means[i + 1], sigmas[i + 1],
+            0.0, 1.0,
+        )
+        boundaries.append(float(np.clip(b, 0.0, 1.0)))
+
+    if k == 2:
+        b = boundaries[0]
+        return {
+            "rho_uncompressed_only": float(b),
+            "rho_compressed_only": float(b),
+            "rho_shared_low": float(b),
+            "rho_shared_high": float(b),
+        }
+
+    # k >= 3: use first and last boundaries for shared band (covers middle components)
+    rho_shared_low = boundaries[0]
+    rho_shared_high = boundaries[-1]
+    rho_u = min(rho_shared_low, float(means[0] + 2 * sigmas[0]), 0.4)
+    rho_c = max(rho_shared_high, float(means[-1] - 2 * sigmas[-1]), 0.5)
     return {
-        "rho_uncompressed_only": float(np.clip(p25 * 0.6, 0.05, 0.35)),
-        "rho_compressed_only": float(np.clip(p75 + (1 - p75) * 0.5, 0.65, 0.98)),
-        "rho_shared_low": float(np.percentile(rho, 40)),
-        "rho_shared_high": float(np.percentile(rho, 75)),
+        "rho_uncompressed_only": float(np.clip(rho_u, 0.05, 0.4)),
+        "rho_compressed_only": float(np.clip(rho_c, 0.5, 0.98)),
+        "rho_shared_low": float(rho_shared_low),
+        "rho_shared_high": float(rho_shared_high),
     }
 
 
 def classify_for_plot(rho: float, theta: float, thresh: Dict[str, float]) -> str:
     """
-    Classify a (rho, theta) point using the same taxonomy as classify_feature
-    but with the given threshold dict (e.g. adaptive thresholds). Ensures scatter
-    plot point colors match the drawn threshold lines.
+    Classify (rho, theta) using GMM-based rho thresholds and fixed theta thresholds.
+    Used for feature_classification.csv, plots, and all evaluation.
     """
     rho_u = thresh["rho_uncompressed_only"]
     rho_c = thresh["rho_compressed_only"]
@@ -187,6 +268,7 @@ def plot_loss_curves(training_history: Dict, output_path: Path) -> None:
 
 
 def plot_rho_histogram(classification_df: pd.DataFrame, output_path: Path) -> None:
+    """Plot rho histogram with GMM-based threshold lines."""
     fig, ax = plt.subplots(figsize=(6, 4))
     rho_values = np.asarray(classification_df["rho"].values)
     rho_values = rho_values[(rho_values >= 0) & (rho_values <= 1)]
@@ -216,12 +298,13 @@ def plot_rho_histogram(classification_df: pd.DataFrame, output_path: Path) -> No
 
 
 def plot_rho_theta_scatter(classification_df: pd.DataFrame, output_path: Path) -> None:
+    """Plot rho vs theta scatter with GMM-based classification colors."""
     fig, ax = plt.subplots(figsize=(6, 5))
     thresh = compute_adaptive_rho_thresholds(classification_df)
     rho_u, rho_c = thresh["rho_uncompressed_only"], thresh["rho_compressed_only"]
     rho_sl, rho_sh = thresh["rho_shared_low"], thresh["rho_shared_high"]
 
-    # Classify each point using the same adaptive thresholds we draw, so colors match the regions
+    # Classify each point using the same GMM-based thresholds we draw, so colors match the regions
     plot_class = classification_df.apply(
         lambda row: classify_for_plot(row["rho"], row["theta"], thresh), axis=1
     )
@@ -401,8 +484,13 @@ CLASS_DISTRIBUTION_ORDER = [
 
 
 def plot_class_distribution(classification_df: pd.DataFrame, output_path: Path) -> None:
+    """Plot class distribution using GMM-based thresholds (consistent with rho_histogram and rho_theta_scatter)."""
     fig, ax = plt.subplots(figsize=(6, 4))
-    raw_counts = classification_df["primary_class"].value_counts()
+    thresh = compute_adaptive_rho_thresholds(classification_df)
+    gmm_class = classification_df.apply(
+        lambda row: classify_for_plot(row["rho"], row["theta"], thresh), axis=1
+    )
+    raw_counts = gmm_class.value_counts()
     # Always show all 6 classes in fixed order; use 0 for missing classes.
     counts = [raw_counts.get(c, 0) for c in CLASS_DISTRIBUTION_ORDER]
     colors = [COLORS[c] for c in CLASS_DISTRIBUTION_ORDER]
@@ -422,15 +510,76 @@ def plot_class_distribution(classification_df: pd.DataFrame, output_path: Path) 
     plt.close()
 
 
+def plot_shared_geometry(shared_geom_df: pd.DataFrame, plots_dir: Path) -> None:
+    """
+    Histograms of angle_deg and norm_ratio_raw per subclass, and scatter of theta vs norm_ratio_raw.
+    """
+    shared_classes = [
+        "shared_aligned",
+        "shared_redirected",
+        "shared_attenuated",
+        "shared_intermediate",
+    ]
+    plot_df = shared_geom_df[shared_geom_df["primary_class"].isin(shared_classes)]
+    if len(plot_df) == 0:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    for col, ax in zip(["angle_deg", "norm_ratio_raw"], axes):
+        for cls in shared_classes:
+            subset = plot_df[plot_df["primary_class"] == cls]
+            if len(subset) > 0 and col in subset.columns:
+                ax.hist(
+                    subset[col].dropna(),
+                    bins=25,
+                    alpha=0.6,
+                    label=cls,
+                    color=COLORS.get(cls, "#7F8C8D"),
+                    edgecolor="black",
+                    linewidth=0.3,
+                )
+        ax.set_xlabel(col.replace("_", " ").title())
+        ax.set_ylabel("Count")
+        _apply_iclr_style(ax)
+        ax.legend(frameon=True, fontsize=9)
+        ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "shared_geometry_histograms.png", dpi=ICLR_DPI, bbox_inches="tight")
+    plt.close()
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for cls in shared_classes:
+        subset = plot_df[plot_df["primary_class"] == cls]
+        if len(subset) > 0 and "theta" in subset.columns and "norm_ratio_raw" in subset.columns:
+            ax.scatter(
+                subset["theta"],
+                subset["norm_ratio_raw"],
+                c=COLORS.get(cls, "#7F8C8D"),
+                label=f"{cls} ({len(subset)})",
+                alpha=0.65,
+                s=18,
+                edgecolors="none",
+            )
+    ax.set_xlabel(r"decoder cosine similarity, $\theta$")
+    ax.set_ylabel(r"norm ratio $\|W_c\|/\|W_u\|$")
+    _apply_iclr_style(ax)
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), frameon=True, fontsize=9)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(plots_dir / "shared_geometry_theta_vs_norm_ratio.png", dpi=ICLR_DPI, bbox_inches="tight")
+    plt.close()
+
+
 def generate_all_plots(
     training_history: Dict,
     classification_df: pd.DataFrame,
     merged_df: pd.DataFrame,
     superposition_results: Dict,
     plots_dir: Path,
+    features_dir: Optional[Path] = None,
 ) -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
-    
+
     plot_loss_curves(training_history, plots_dir / "loss_curves.png")
     plot_rho_histogram(classification_df, plots_dir / "rho_histogram.png")
     plot_rho_theta_scatter(classification_df, plots_dir / "rho_theta_scatter.png")
@@ -438,3 +587,8 @@ def generate_all_plots(
     plot_cf_shift_per_class(merged_df, plots_dir / "cf_shift_per_class.png")
     plot_superposition_analysis(superposition_results, plots_dir / "superposition_analysis.png")
     plot_class_distribution(classification_df, plots_dir / "class_distribution.png")
+
+    geom_path = (features_dir or plots_dir.parent / "features") / "shared_features_geometry.csv"
+    if geom_path.exists():
+        shared_geom_df = pd.read_csv(geom_path)
+        plot_shared_geometry(shared_geom_df, plots_dir)
