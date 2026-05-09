@@ -1,0 +1,19 @@
+{
+  "mlp": {
+    "jaccard": 0.6842105263157895,
+    "spearman_rho": 0.7861790886286228,
+    "spearman_pval": 9.678964974531555e-08,
+    "stability": 0.75
+  },
+  "self_attention": {
+    "jaccard": 0.6842105263157895,
+    "spearman_rho": 0.7456011730205278,
+    "spearman_pval": 9.747303631934584e-07,
+    "stability": 0.75
+  },
+  "aggregate": {
+    "jaccard_mean": 0.6842105263157895,
+    "spearman_mean": 0.7658901308245754,
+    "stability_mean": 0.75
+  }
+}
