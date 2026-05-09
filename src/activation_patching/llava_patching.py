@@ -275,6 +275,8 @@ def compute_llava_patching_scores(
     model_label: str = "LLaVA",
     patch_batch_size: int = None,
     use_amp: bool = None,
+    sample_start: int = 0,
+    sample_end: int = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray], List[str], List[Dict]]:
     """
     Compute per-layer, per-token, per-component patching scores for LLaVA-1.5.
@@ -294,10 +296,13 @@ def compute_llava_patching_scores(
     print(f"    LLM has {num_layers} layers")
 
     all_sample_results = []
-    n = min(num_samples, len(dataset))
+    if sample_end is None:
+        sample_end = min(num_samples, len(dataset))
+    sample_end = min(sample_end, len(dataset))
+    sample_start = max(0, sample_start)
     skipped = 0
 
-    for sample_idx in tqdm(range(n), desc="Patching samples", unit="sample"):
+    for sample_idx in tqdm(range(sample_start, sample_end), desc="Patching samples", unit="sample"):
         sample = dataset[sample_idx]
         image_clean = sample["image_original"]
         image_cf = sample["image_counterfact"]
@@ -431,6 +436,9 @@ def run_llava_patching(
     output_dir: Optional[Any] = None,
     patch_batch_size: Optional[int] = None,
     use_amp: Optional[bool] = None,
+    sample_start: int = 0,
+    sample_end: Optional[int] = None,
+    output_suffix: str = "",
 ) -> Dict[str, Any]:
     """
     Run activation patching for LLaVA-1.5-7B (uncompressed or compressed).
@@ -439,7 +447,7 @@ def run_llava_patching(
     from src.crosscoder.activations import load_compressed_model, load_uncompressed_model
 
     output_dir = output_dir or patching_config.PATCHING_RESULTS_DIR
-    out_path = output_dir / f"llava__{model_variant}"
+    out_path = output_dir / (f"llava__{model_variant}" + (f"__{output_suffix}" if output_suffix else ""))
     out_path.mkdir(parents=True, exist_ok=True)
     metrics_dir = out_path / "metrics"
     plots_dir = out_path / "plots"
@@ -469,6 +477,8 @@ def run_llava_patching(
         model, processor, dataset, num_samples, model_label,
         patch_batch_size=patch_batch_size,
         use_amp=use_amp,
+        sample_start=sample_start,
+        sample_end=sample_end,
     )
 
     del model, processor
@@ -508,5 +518,15 @@ def run_llava_patching(
     plot_token_importance(mlp, attn, xattn, tok_labels, model_label, plots_dir / "token_importance.png")
 
     np.savez(out_path / "patching_data.npz", mlp=mlp, attn=attn, xattn=np.zeros_like(mlp), token_labels=tok_labels)
+
+    import pickle
+    with open(out_path / "raw_sample_results.pkl", "wb") as _f:
+        pickle.dump({
+            "variant": model_variant,
+            "sample_start": sample_start,
+            "sample_end": sample_end,
+            "num_layers": int(mlp.shape[1]),
+            "all_results": all_results,
+        }, _f)
 
     return metrics

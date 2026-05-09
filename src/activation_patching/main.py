@@ -109,6 +109,9 @@ def main():
         default=None,
         help="Output directory for results",
     )
+    parser.add_argument("--sample_start", type=int, default=0)
+    parser.add_argument("--sample_end", type=int, default=None)
+    parser.add_argument("--output_suffix", type=str, default="")
     parser.add_argument(
         "--patch_batch_size",
         type=int,
@@ -175,6 +178,9 @@ def main():
                 output_dir=output_dir,
                 patch_batch_size=args.patch_batch_size,
                 use_amp=False if args.no_amp else None,
+                sample_start=args.sample_start,
+                sample_end=args.sample_end,
+                output_suffix=args.output_suffix,
             )
             all_metrics[v] = m
         for comp_v in ["wanda", "awq"]:
