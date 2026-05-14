@@ -10,7 +10,6 @@ __pycache__
 *.pyzwz
 *.pth
 
-
 *.tex
 *.bib
 
@@ -18,6 +17,8 @@ data
 *models*
 .json*
 
+EN_part
+CN_part
 
 *output*
 
