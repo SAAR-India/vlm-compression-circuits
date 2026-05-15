@@ -1,7 +1,14 @@
 import os
 import re
 import ast
-import ipdb
+
+
+class ipdb:  # noqa: A001
+    @staticmethod
+    def set_trace(*_args, **_kwargs):
+        pass
+
+
 from vqa_metric import vqa_evaluation
 
 

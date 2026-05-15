@@ -1,9 +1,9 @@
 """
-Run BLIP-VQA on OCRBench v2 with baseline and compressed checkpoints.
+Run VQA models on OCRBench v2 with baseline and compressed checkpoints.
 
 This script writes OCRBench-compatible prediction JSON files, runs the official
 per-sample scorer, and writes a compact summary for comparing uncompressed vs.
-compressed BLIP-VQA.
+compressed VLMs.
 
 Example:
     python src/ocr_bench/run_blip_vqa_ocrbench.py \
@@ -14,6 +14,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import subprocess
 import sys
@@ -31,8 +32,28 @@ if str(REPO_ROOT) not in sys.path:
 
 
 BLIP_VQA_MODEL_ID = "Salesforce/blip-vqa-base"
+LLAVA15_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
+QWEN3VL_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
 DEFAULT_OCRBENCH_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results" / "ocrbench_blip_vqa"
+
+MODEL_CONFIGS = {
+    "blip": {
+        "display_name": "BLIP-VQA",
+        "default_baseline": BLIP_VQA_MODEL_ID,
+        "default_compressed_arg": "compressed_model_path",
+    },
+    "llava": {
+        "display_name": "LLaVA-1.5",
+        "default_baseline": LLAVA15_MODEL_ID,
+        "default_compressed_arg": "llava_compressed_model_path",
+    },
+    "qwen": {
+        "display_name": "Qwen3-VL",
+        "default_baseline": QWEN3VL_MODEL_ID,
+        "default_compressed_arg": "qwen_compressed_model_path",
+    },
+}
 
 
 EN_CATEGORY_TYPES = {
@@ -100,7 +121,14 @@ CN_CATEGORY_TYPES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate and score OCRBench v2 predictions for baseline and compressed BLIP-VQA."
+        description="Generate and score OCRBench v2 predictions for baseline and compressed VLMs."
+    )
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=sorted(MODEL_CONFIGS),
+        default=["blip"],
+        help="Model families to evaluate. Use '--models blip llava qwen' to run all three.",
     )
     parser.add_argument(
         "--ocrbench-dir",
@@ -123,13 +151,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--compressed-model-path",
         type=Path,
-        required=True,
-        help="Compressed BLIP-VQA checkpoint directory, e.g. compressed_models/blip2__wanda__V_P.",
+        default=None,
+        help=(
+            "Compressed BLIP-VQA checkpoint directory, e.g. compressed_models/blip2__wanda__V_P. "
+            "Kept for backward compatibility with the original BLIP-only runner."
+        ),
     )
     parser.add_argument(
         "--baseline-model-path",
         default=BLIP_VQA_MODEL_ID,
         help="Baseline BLIP-VQA model id/path. Defaults to Salesforce/blip-vqa-base.",
+    )
+    parser.add_argument(
+        "--llava-baseline-model-path",
+        default=LLAVA15_MODEL_ID,
+        help="Baseline LLaVA model id/path. Defaults to llava-hf/llava-1.5-7b-hf.",
+    )
+    parser.add_argument(
+        "--llava-compressed-model-path",
+        type=Path,
+        default=None,
+        help="Compressed LLaVA checkpoint directory.",
+    )
+    parser.add_argument(
+        "--qwen-baseline-model-path",
+        default=QWEN3VL_MODEL_ID,
+        help="Baseline Qwen model id/path. Defaults to Qwen/Qwen3-VL-2B-Instruct.",
+    )
+    parser.add_argument(
+        "--qwen-compressed-model-path",
+        type=Path,
+        default=None,
+        help="Compressed Qwen checkpoint directory.",
     )
     parser.add_argument(
         "--output-dir",
@@ -148,6 +201,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=64,
         help="Maximum generated answer tokens per OCRBench sample.",
+    )
+    parser.add_argument(
+        "--max-question-tokens",
+        type=int,
+        default=512,
+        help=(
+            "Truncate tokenized OCRBench questions to this length before the BLIP-VQA encoder "
+            "(BERT-style 512 positional cap); prevents crashes on extra-long prompts."
+        ),
     )
     parser.add_argument(
         "--limit",
@@ -239,6 +301,36 @@ def move_inputs_to_device(inputs: Any, device: torch.device) -> Any:
     return inputs.to(device=device, dtype=dtype)
 
 
+def move_mapping_to_device(inputs: Dict[str, Any], device: torch.device) -> Dict[str, Any]:
+    dtype = torch.float16 if device.type == "cuda" else torch.float32
+    moved: Dict[str, Any] = {}
+    for key, value in inputs.items():
+        if hasattr(value, "to"):
+            if torch.is_tensor(value) and value.is_floating_point():
+                moved[key] = value.to(device=device, dtype=dtype)
+            else:
+                moved[key] = value.to(device=device)
+        else:
+            moved[key] = value
+    return moved
+
+
+def blip_question_seq_max_len(processor: Any, user_cap: int) -> int:
+    """
+    Clamp question seq length so it fits the BLIP-VQA text encoder (512 positional embeddings).
+    Some OCRBench questions tokenize beyond that and would otherwise crash generation.
+    """
+    tok = getattr(processor, "tokenizer", None)
+    if tok is None:
+        return min(user_cap, 512)
+    tok_max = getattr(tok, "model_max_length", 512)
+    if not isinstance(tok_max, int) or tok_max <= 0:
+        tok_max = 512
+    if tok_max > 512:
+        tok_max = 512
+    return min(tok_max, user_cap)
+
+
 def flush_gpu() -> None:
     import gc
 
@@ -303,35 +395,68 @@ def awq_state_dict_to_fp16(
     return converted
 
 
-def load_blip_vqa_for_eval(model_path: str) -> Tuple[Any, Any]:
-    from transformers import BlipForQuestionAnswering, BlipProcessor
-
+def model_load_kwargs() -> Dict[str, Any]:
     dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    model_kwargs: Dict[str, Any] = {
+    kwargs: Dict[str, Any] = {
         "torch_dtype": dtype,
         "low_cpu_mem_usage": True,
     }
     if torch.cuda.is_available():
-        model_kwargs["device_map"] = "cuda:0"
+        kwargs["device_map"] = "cuda:0"
+    return kwargs
+
+
+def load_model_for_eval(model_family: str, model_path: str) -> Tuple[Any, Any]:
+    model_kwargs = model_load_kwargs()
 
     path = Path(model_path)
+    if model_family == "blip":
+        from transformers import BlipForQuestionAnswering, BlipProcessor
+
+        model_cls = BlipForQuestionAnswering
+        processor_cls = BlipProcessor
+        default_model_id = BLIP_VQA_MODEL_ID
+        processor_kwargs: Dict[str, Any] = {}
+    elif model_family == "llava":
+        from transformers import AutoProcessor, LlavaForConditionalGeneration
+
+        model_cls = LlavaForConditionalGeneration
+        processor_cls = AutoProcessor
+        default_model_id = LLAVA15_MODEL_ID
+        processor_kwargs = {"use_fast": False}
+    elif model_family == "qwen":
+        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
+
+        model_cls = Qwen3VLForConditionalGeneration
+        processor_cls = AutoProcessor
+        default_model_id = QWEN3VL_MODEL_ID
+        processor_kwargs = {}
+    else:
+        raise ValueError(f"Unsupported model family: {model_family}")
+
     if path.is_dir() and is_awq_checkpoint(path):
         from safetensors.torch import load_file
 
         with (path / "config.json").open("r", encoding="utf-8") as f:
             config = json.load(f)
-        base_model_id = config.get("base_model_id") or BLIP_VQA_MODEL_ID
+        base_model_id = config.get("base_model_id") or default_model_id
         quantized_layers = config.get("quantized_layers", [])
         group_size = (config.get("quantization_config") or {}).get("group_size", 128)
 
         state_dict = load_file(str(path / "model.safetensors"))
         converted = awq_state_dict_to_fp16(state_dict, quantized_layers, group_size)
-        model = BlipForQuestionAnswering.from_pretrained(base_model_id, **model_kwargs)
+        model = model_cls.from_pretrained(base_model_id, **model_kwargs)
         model.load_state_dict(converted, strict=True)
-        processor = BlipProcessor.from_pretrained(path)
+        processor = processor_cls.from_pretrained(path, **processor_kwargs)
     else:
-        model = BlipForQuestionAnswering.from_pretrained(model_path, **model_kwargs)
-        processor = BlipProcessor.from_pretrained(BLIP_VQA_MODEL_ID)
+        model = model_cls.from_pretrained(model_path, **model_kwargs)
+        processor = processor_cls.from_pretrained(default_model_id, **processor_kwargs)
+
+    tokenizer = getattr(processor, "tokenizer", None)
+    if model_family in {"llava", "qwen"} and tokenizer is not None:
+        tokenizer.padding_side = "left"
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
 
     if not torch.cuda.is_available():
         model = model.to("cpu")
@@ -339,49 +464,120 @@ def load_blip_vqa_for_eval(model_path: str) -> Tuple[Any, Any]:
     return model, processor
 
 
+def build_llava_prompt(question: str) -> str:
+    return f"USER: <image>\n{question}\nASSISTANT:"
+
+
+def generate_chat_prediction(
+    model: Any,
+    processor: Any,
+    image: Image.Image,
+    question: str,
+    device: torch.device,
+    model_family: str,
+    max_new_tokens: int,
+) -> str:
+    if model_family == "qwen":
+        messages = [
+            {"role": "user", "content": [{"type": "image", "image": image}, {"type": "text", "text": question}]}
+        ]
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        inputs.pop("token_type_ids", None)
+    elif model_family == "llava":
+        inputs = processor(
+            images=image,
+            text=build_llava_prompt(question),
+            return_tensors="pt",
+            padding=True,
+        )
+    else:
+        raise ValueError(f"Chat prediction is not used for model family: {model_family}")
+
+    inputs = move_mapping_to_device(dict(inputs), device)
+    prompt_len = inputs["input_ids"].shape[1]
+    out = model.generate(
+        **inputs,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        return_dict_in_generate=True,
+    )
+    gen_ids = out.sequences[0, prompt_len:]
+    return processor.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+
+
 @torch.no_grad()
 def generate_predictions(
+    model_family: str,
     model_path: str,
     rows: List[Dict[str, Any]],
     ocrbench_dir: Path,
     output_path: Path,
     batch_size: int,
     max_new_tokens: int,
+    max_question_tokens: int,
 ) -> None:
     flush_gpu()
-    print(f"Loading BLIP-VQA model from: {model_path}")
-    model, processor = load_blip_vqa_for_eval(model_path)
+    display_name = MODEL_CONFIGS[model_family]["display_name"]
+    print(f"Loading {display_name} model from: {model_path}")
+    model, processor = load_model_for_eval(model_family, model_path)
     device = next(model.parameters()).device
-    print(f"Model device: {device}; samples: {len(rows)}; batch_size: {batch_size}")
+    q_cap = blip_question_seq_max_len(processor, max_question_tokens) if model_family == "blip" else max_question_tokens
+    effective_batch_size = batch_size if model_family == "blip" else 1
+    print(
+        f"Model device: {device}; samples: {len(rows)}; batch_size: {effective_batch_size}; "
+        f"question truncation max_length={q_cap}"
+    )
 
     predictions: List[Dict[str, Any]] = []
     progress = tqdm(total=len(rows), desc=output_path.stem, unit="sample")
     try:
-        for batch in batched(rows, batch_size):
+        for batch in batched(rows, effective_batch_size):
             images = [load_image(ocrbench_dir / str(row["image_path"])) for row in batch]
             questions = [str(row.get("question", "")) for row in batch]
-            inputs = processor(
-                images=images,
-                text=questions,
-                return_tensors="pt",
-                padding=True,
-            )
-            inputs = move_inputs_to_device(inputs, device)
+            if model_family == "blip":
+                inputs = processor(
+                    images=images,
+                    text=questions,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=q_cap,
+                )
+                inputs = move_inputs_to_device(inputs, device)
 
-            out = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                return_dict_in_generate=True,
-                output_scores=True,
-            )
-            num_steps = len(out.scores) if out.scores else 0
-            if num_steps == 0:
-                batch_preds = [""] * len(batch)
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=False,
+                    return_dict_in_generate=True,
+                    output_scores=True,
+                )
+                num_steps = len(out.scores) if out.scores else 0
+                if num_steps == 0:
+                    batch_preds = [""] * len(batch)
+                else:
+                    batch_preds = [
+                        processor.decode(out.sequences[i, -num_steps:], skip_special_tokens=True).strip()
+                        for i in range(out.sequences.shape[0])
+                    ]
             else:
                 batch_preds = [
-                    processor.decode(out.sequences[i, -num_steps:], skip_special_tokens=True).strip()
-                    for i in range(out.sequences.shape[0])
+                    generate_chat_prediction(
+                        model=model,
+                        processor=processor,
+                        image=image,
+                        question=question[:q_cap],
+                        device=device,
+                        model_family=model_family,
+                        max_new_tokens=max_new_tokens,
+                    )
+                    for image, question in zip(images, questions)
                 ]
 
             for row, pred in zip(batch, batch_preds):
@@ -400,6 +596,49 @@ def generate_predictions(
     print(f"Wrote predictions: {output_path}")
 
 
+def assert_ocrbench_eval_importable(eval_scripts_dir: Path, requirements_txt: Path) -> None:
+    """
+    Fail fast before GPU inference if official eval.py deps are missing.
+
+    Inference only needs PyTorch/transformers; eval.py pulls in distance/apted/zss/etc.
+    Colab users often omit `pip install -r src/ocr_bench/requirements.txt` otherwise.
+    """
+    esp = eval_scripts_dir.resolve()
+    eval_py_path = esp / "eval.py"
+    if not eval_py_path.is_file():
+        raise FileNotFoundError(f"Missing OCRBench eval.py: {eval_py_path}")
+
+    inserted = False
+    path_str = str(esp)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+        inserted = True
+    try:
+        spec = importlib.util.spec_from_file_location("_ocrbench_eval_dependency_probe", eval_py_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Could not load spec for {eval_py_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        del sys.modules["_ocrbench_eval_dependency_probe"]
+    except ModuleNotFoundError as exc:
+        req_hint = ""
+        if requirements_txt.is_file():
+            req_hint = (
+                f"\nInstall OCRBench scorer dependencies with the SAME Python as above:\n\n"
+                f"  {sys.executable} -m pip install -r {requirements_txt}\n\n"
+                "On Jupyter/Colab, use in a notebook cell:\n\n"
+                f"  %pip install -r {requirements_txt}\n\n"
+                "Inference does not install these packages for you.\n\n"
+                f"The import that failed: {exc!r}"
+            )
+        raise RuntimeError(
+            "Official OCRBench eval.py cannot load (missing scorer packages)." + req_hint
+        ) from exc
+    finally:
+        if inserted:
+            sys.path.remove(path_str)
+
+
 def run_official_eval(
     eval_scripts_dir: Path,
     ocrbench_dir: Path,
@@ -415,6 +654,7 @@ def run_official_eval(
 
     scored_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"Scoring predictions with official eval.py: {preds_path}")
+    print(f"(subprocess scorer python={sys.executable})", flush=True)
     subprocess.run(
         [
             sys.executable,
@@ -493,8 +733,8 @@ def summarize_scores(scored_path: Path, summary_path: Path) -> Dict[str, Any]:
 
 
 def print_comparison(summaries: Dict[str, Dict[str, Any]]) -> None:
-    print("\nOCRBench BLIP-VQA comparison")
-    print("=" * 34)
+    print("\nOCRBench VLM comparison")
+    print("=" * 24)
     for name, summary in summaries.items():
         en = summary.get("english_overall")
         cn = summary.get("chinese_overall")
@@ -508,53 +748,101 @@ def print_comparison(summaries: Dict[str, Dict[str, Any]]) -> None:
         print(f" | overall={overall:.4f}" if overall is not None else " | overall=n/a")
 
 
+def validate_selected_models(args: argparse.Namespace) -> List[Tuple[str, str, str]]:
+    jobs: List[Tuple[str, str, str]] = []
+    for model_family in args.models:
+        if model_family == "blip":
+            baseline_path = args.baseline_model_path
+            compressed_path = args.compressed_model_path
+        elif model_family == "llava":
+            baseline_path = args.llava_baseline_model_path
+            compressed_path = args.llava_compressed_model_path
+        elif model_family == "qwen":
+            baseline_path = args.qwen_baseline_model_path
+            compressed_path = args.qwen_compressed_model_path
+        else:
+            raise ValueError(f"Unsupported model family: {model_family}")
+
+        if compressed_path is None:
+            raise ValueError(
+                f"--{MODEL_CONFIGS[model_family]['default_compressed_arg'].replace('_', '-')} "
+                f"is required when '{model_family}' is included in --models."
+            )
+        resolved_compressed_path = resolve_path(compressed_path)
+        if not resolved_compressed_path.is_dir():
+            raise FileNotFoundError(
+                f"Compressed {model_family} model directory not found: {resolved_compressed_path}"
+            )
+
+        jobs.append((model_family, "baseline", str(baseline_path)))
+        jobs.append((model_family, "compressed", str(resolved_compressed_path)))
+    return jobs
+
+
+def output_run_name(model_family: str, label: str) -> str:
+    if model_family == "blip":
+        return f"blip_vqa_{label}"
+    return f"{model_family}_{label}"
+
+
 def main() -> None:
     args = parse_args()
     if args.batch_size < 1:
         raise ValueError("--batch-size must be >= 1")
     if args.max_new_tokens < 1:
         raise ValueError("--max-new-tokens must be >= 1")
+    if args.max_question_tokens < 16:
+        raise ValueError("--max-question-tokens must be >= 16")
 
     ocrbench_dir = resolve_path(args.ocrbench_dir)
     json_file = resolve_path(args.json_file) if args.json_file else ocrbench_dir / "OCRBench_v2.json"
     eval_scripts_dir = (
         resolve_path(args.eval_scripts_dir) if args.eval_scripts_dir else ocrbench_dir / "eval_scripts"
     )
-    compressed_model_path = resolve_path(args.compressed_model_path)
     output_dir = resolve_path(args.output_dir)
+    jobs = validate_selected_models(args)
 
     if not json_file.is_file():
         raise FileNotFoundError(f"OCRBench JSON not found: {json_file}")
-    if not compressed_model_path.is_dir():
-        raise FileNotFoundError(f"Compressed model directory not found: {compressed_model_path}")
+
+    eval_py_chk = eval_scripts_dir / "eval.py"
+    if not eval_py_chk.is_file():
+        raise FileNotFoundError(f"Missing OCRBench scorer: {eval_py_chk}")
+
+    req_txt = ocrbench_dir / "requirements.txt"
+    if not req_txt.is_file():
+        req_txt = REPO_ROOT / "src" / "ocr_bench" / "requirements.txt"
+
+    print(f"Checking OCRBench eval.py imports ({sys.executable})...", flush=True)
+    assert_ocrbench_eval_importable(eval_scripts_dir, req_txt)
+    print("OCRBench scorer dependencies OK.", flush=True)
 
     rows = load_ocrbench_rows(json_file, ocrbench_dir, args.subset, args.limit)
     if not rows:
         raise RuntimeError("No OCRBench rows selected. Check --ocrbench-dir, --subset, and --limit.")
     print(f"Selected {len(rows)} OCRBench row(s) from {json_file}")
 
-    jobs: List[Tuple[str, str]] = [
-        ("baseline", str(args.baseline_model_path)),
-        ("compressed", str(compressed_model_path)),
-    ]
     summaries: Dict[str, Dict[str, Any]] = {}
 
-    for label, model_path in jobs:
-        preds_path = output_dir / f"blip_vqa_{label}_preds.json"
-        scored_path = output_dir / f"blip_vqa_{label}_scored.json"
-        stdout_path = output_dir / f"blip_vqa_{label}_get_score.txt"
-        summary_path = output_dir / f"blip_vqa_{label}_summary.json"
+    for model_family, label, model_path in jobs:
+        run_name = output_run_name(model_family, label)
+        preds_path = output_dir / f"{run_name}_preds.json"
+        scored_path = output_dir / f"{run_name}_scored.json"
+        stdout_path = output_dir / f"{run_name}_get_score.txt"
+        summary_path = output_dir / f"{run_name}_summary.json"
 
         if args.skip_existing_preds and preds_path.is_file():
             print(f"Reusing existing predictions: {preds_path}")
         else:
             generate_predictions(
+                model_family=model_family,
                 model_path=model_path,
                 rows=rows,
                 ocrbench_dir=ocrbench_dir,
                 output_path=preds_path,
                 batch_size=args.batch_size,
                 max_new_tokens=args.max_new_tokens,
+                max_question_tokens=args.max_question_tokens,
             )
 
         run_official_eval(
@@ -565,9 +853,9 @@ def main() -> None:
             score_stdout_path=stdout_path,
             skip_get_score=args.skip_official_get_score,
         )
-        summaries[label] = summarize_scores(scored_path, summary_path)
+        summaries[run_name] = summarize_scores(scored_path, summary_path)
 
-    comparison_path = output_dir / "blip_vqa_comparison_summary.json"
+    comparison_path = output_dir / "vlm_ocrbench_comparison_summary.json"
     comparison_path.write_text(json.dumps(summaries, ensure_ascii=False, indent=2), encoding="utf-8")
     print_comparison(summaries)
     print(f"\nWrote comparison summary: {comparison_path}")

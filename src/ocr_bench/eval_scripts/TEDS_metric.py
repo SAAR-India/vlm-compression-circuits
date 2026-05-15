@@ -12,7 +12,14 @@
 import re
 import ast
 import json
-import ipdb
+
+
+class ipdb:  # noqa: A001
+    @staticmethod
+    def set_trace(*_args, **_kwargs):
+        pass
+
+
 import distance
 from apted import APTED, Config
 from itertools import product
