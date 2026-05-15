@@ -1,7 +1,15 @@
 import re
 import os
 import json
-import ipdb
+
+# Upstream OCRBench ships `import ipdb` for debugger hooks. Headless installs often lack
+# ipdb; subprocess may use a different Python than `pip`. Use an unconditional shim—no import.
+class ipdb:  # noqa: A001
+    @staticmethod
+    def set_trace(*_args, **_kwargs):
+        pass
+
+
 import math
 import numpy as np
 

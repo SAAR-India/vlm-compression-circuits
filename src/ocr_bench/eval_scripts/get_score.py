@@ -1,6 +1,13 @@
 import os
 import json
-import ipdb
+
+
+class ipdb:  # noqa: A001
+    @staticmethod
+    def set_trace(*_args, **_kwargs):
+        pass
+
+
 import argparse
 
 

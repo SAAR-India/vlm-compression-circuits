@@ -1,7 +1,14 @@
 import re
 import os
 import ast
-import ipdb
+
+
+class ipdb:  # noqa: A001
+    @staticmethod
+    def set_trace(*_args, **_kwargs):
+        pass
+
+
 import shutil
 import zipfile
 import subprocess

@@ -7,7 +7,8 @@ matplotlib==3.7.5
 mmeval
 numpy<2.0.0
 opencv-python-headless<4.10
-pandas==2.0.3
+# Use 2.1.4+ for prebuilt wheels on Python 3.12 (2.0.3 often resolves to source build and fails).
+pandas>=2.1.4,<3.0.0
 Pillow==12.1.1
 pylatexenc==2.10
 python_Levenshtein==0.27.3
