@@ -6,12 +6,7 @@ import random
 
 from tqdm import tqdm
 
-from config import (
-    CIRCUIT_TYPES,
-    CONFIDENCE_THRESHOLD,
-    RANDOM_SEED,
-    VAL_FRACTION,
-)
+from config import CIRCUIT_TYPES, CONFIDENCE_THRESHOLD, RANDOM_SEED, VAL_FRACTION
 
 
 def _passes_filter(record, require_both_models=True):

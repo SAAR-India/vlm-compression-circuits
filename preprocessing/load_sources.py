@@ -6,6 +6,7 @@ For Visual-Counterfact (VQA):
 - We parse it into a list of lowercase gold answers in `correct_answer_normalized`
   for robust correctness checks.
 """
+import ast
 from pathlib import Path
 
 from datasets import load_from_disk
@@ -19,19 +20,7 @@ from config import (
     VISUAL_COUNTERFACT_DIR,
     XAITK_DIR,
 )
-
-
-def _generate_visual_counterfact_question(split_name, row):
-    """Generate appropriate VQA question for Visual-Counterfact samples.
-    
-    Color split: 'What color is the {object}?'
-    Size split: 'Which object appears larger in the image?'
-    """
-    obj = row["object"]
-    if split_name == "color":
-        return f"What color is the {obj}?"
-    # size split
-    return "Which object appears larger in the image?"
+import prepross_utils
 
 
 def _normalize_correct_answer(answer):
@@ -40,7 +29,6 @@ def _normalize_correct_answer(answer):
     On disk this dataset stores color answers as a string like \"['green']\" (not a real list).
     Size answers are strings like \"tree\".
     """
-    import ast
 
     if isinstance(answer, list):
         return [str(a).lower().strip() for a in answer]
@@ -61,7 +49,7 @@ def _load_visual_counterfact():
             continue
         ds = ds_dict[split_name]
         for i, row in enumerate(tqdm(ds, desc=f"Visual-Counterfact ({split_name})", unit="sample")):
-            question = _generate_visual_counterfact_question(split_name, row)
+            question = prepross_utils.question_for_split(split_name, row)
             correct_answer = row["correct_answer"]
             correct_answer_normalized = _normalize_correct_answer(correct_answer)
             

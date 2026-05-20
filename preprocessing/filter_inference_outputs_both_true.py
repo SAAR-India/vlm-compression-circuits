@@ -19,16 +19,9 @@ def _is_true(x) -> bool:
     return False
 
 
-def filter_jsonl(
-    in_path: str | Path,
-    out_path: str | Path,
-    require_fields: bool = True,
-) -> tuple[int, int]:
-    """
-    Returns (kept, total).
-
-    If `require_fields` is True, records missing correctness flags are dropped.
-    """
+def filter_jsonl(in_path: str | Path, out_path: str | Path,
+                require_fields: bool = True) -> tuple[int, int]:
+    """Returns (kept, total). If require_fields is True, drop records missing correctness"""
     in_path = Path(in_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
