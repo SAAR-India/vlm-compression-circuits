@@ -8,41 +8,24 @@ This is intended for the workflow:
 
 We must re-load sources because inference JSONL intentionally omits `image_*` fields.
 """
-
 from __future__ import annotations
 
 import json
 import sys
+import argparse
 from pathlib import Path
 
 from tqdm import tqdm
 
-_PREP_DIR = Path(__file__).resolve().parent
-if str(_PREP_DIR) not in sys.path:
-    sys.path.insert(0, str(_PREP_DIR))
-
+from preprocess_configs import PRED_KEYS
 from config import OUTPUT_DIR, HF_DATASET_ID  # noqa: E402
 from build_hf_dataset import build_dataset_dict, export_csv  # noqa: E402
 from filter_and_combine import train_val_split_by_circuit_type, flatten_splits  # noqa: E402
 from load_sources import load_all_sources  # noqa: E402
 
-
-PRED_KEYS = [
-    "qwen3vl_pred_original",
-    "qwen3vl_confidence_original",
-    "qwen3vl_correct_original",
-    "blip_pred_original",
-    "blip_confidence_original",
-    "blip_correct_original",
-    # keep these if present (harmless for Visual-Counterfact)
-    "qwen3vl_pred_counterfact",
-    "qwen3vl_confidence_counterfact",
-    "qwen3vl_correct_counterfact",
-    "blip_pred_counterfact",
-    "blip_confidence_counterfact",
-    "blip_correct_counterfact",
-]
-
+_PREP_DIR = Path(__file__).resolve().parent
+if str(_PREP_DIR) not in sys.path:
+    sys.path.insert(0, str(_PREP_DIR))
 
 def _load_selected_predictions(path: str | Path) -> dict[str, dict]:
     path = Path(path)
@@ -60,16 +43,10 @@ def _load_selected_predictions(path: str | Path) -> dict[str, dict]:
     return by_id
 
 
-def build_from_selected_jsonl(
-    selected_jsonl: str | Path,
-    push_to_hub: bool = False,
-    hub_id: str | None = None,
-    out_dir: str | Path | None = None,
-    csv_path: str | Path | None = None,
-) -> tuple[object, Path, int]:
-    """
-    Returns (DatasetDict, csv_path, n_selected).
-    """
+def build_from_selected_jsonl(selected_jsonl: str | Path, push_to_hub: bool = False,
+                            hub_id: str | None = None, out_dir: str | Path | None = None,
+                            csv_path: str | Path | None = None) -> tuple[object, Path, int]:
+    """Returns (DatasetDict, csv_path, n_selected)"""
     selected_jsonl = Path(selected_jsonl)
     preds_by_id = _load_selected_predictions(selected_jsonl)
     selected_ids = set(preds_by_id.keys())
@@ -113,22 +90,12 @@ def build_from_selected_jsonl(
 
 
 def main() -> None:
-    import argparse
-
     p = argparse.ArgumentParser(description="Build HF dataset from selected inference JSONL")
-    p.add_argument(
-        "--selected-jsonl",
-        type=str,
-        default=str(OUTPUT_DIR / "inference_outputs_both_true.jsonl"),
-        help="Path to selected inference outputs JSONL",
-    )
+    p.add_argument("--selected-jsonl", type=str,
+                    default=str(OUTPUT_DIR / "inference_outputs_both_true.jsonl"),
+                    help="Path to selected inference outputs JSONL")
     p.add_argument("--push-to-hub", action="store_true", help="Push dataset to HuggingFace Hub")
-    p.add_argument(
-        "--hub-id",
-        type=str,
-        default=None,
-        help="Override HuggingFace dataset repo id (e.g. 'YourUser/your-dataset')",
-    )
+    p.add_argument("--hub-id", type=str, help="Override HuggingFace dataset repo id")
     p.add_argument("--out-dir", type=str, default=None, help="Where to save dataset on disk")
     p.add_argument("--csv", type=str, default=None, help="Path for metadata CSV")
     args = p.parse_args()

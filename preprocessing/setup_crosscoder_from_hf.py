@@ -21,23 +21,8 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict, Features, Image as HFImage, Value, load_dataset
 from huggingface_hub import snapshot_download
 
-# Paths
-_SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = _SCRIPT_DIR.parent
-OUTPUT_DIR = REPO_ROOT / "output"
-COUNTERFACT_SELECTED_DIR = OUTPUT_DIR / "counterfactual_selected"
-SRC_DIR = REPO_ROOT / "src"
-COMPRESSED_MODELS_DIR = SRC_DIR / "compressed_models"
-
-# HuggingFace dataset (Visual-Counterfact: color/size splits, VQA)
-HF_DATASET_ID = "mgolov/Visual-Counterfact"
-# HuggingFace repo for compressed models (subdirs: blip2__wanda__V, blip2__awq__P, ...)
-HF_COMPRESSED_MODELS_REPO = "vlm_circuits/compressed_models"
-
-# Train/val split for crosscoder
-VAL_FRACTION = 0.2
-RANDOM_SEED = 42
-
+import prepross_utils
+import crosscoder_configs
 
 def _download_compressed_models(repo_id: str, local_dir: Path) -> None:
     """Download compressed model checkpoints from HF into src/compressed_models/."""
@@ -52,15 +37,6 @@ def _download_compressed_models(repo_id: str, local_dir: Path) -> None:
     )
     print(f"Done. Compressed models are at: {local_dir}")
 
-
-def _question_for_split(split_name: str, row: dict) -> str:
-    """Generate VQA question per Visual-Counterfact split."""
-    obj = row.get("object", "object")
-    if split_name == "color":
-        return f"What color is the {obj}?"
-    return "Which object appears larger in the image?"
-
-
 def _records_from_hf_ds(hf_ds, split_name: str):
     """Convert one HF split (color or size) to list of records with crosscoder columns."""
     records = []
@@ -70,7 +46,7 @@ def _records_from_hf_ds(hf_ds, split_name: str):
         image_counterfact = row.get("counterfact_image")
         if image_original is None or image_counterfact is None:
             continue
-        question = _question_for_split(split_name, row)
+        question = prepross_utils.question_for_split(split_name, row)
         records.append({
             "sample_id": f"visual_counterfact_{split_name}_{i}",
             "image_original": image_original,
@@ -120,8 +96,8 @@ def _build_dataset_dict(all_records: list[dict], val_fraction: float, seed: int)
 
 def _run_dataset_setup() -> None:
     """Download Visual-Counterfact from HF and save to output/counterfactual_selected."""
-    print(f"Loading dataset: {HF_DATASET_ID}")
-    ds_dict = load_dataset(HF_DATASET_ID)
+    print(f"Loading dataset: {crosscoder_configs.HF_DATASET_ID}")
+    ds_dict = load_dataset(crosscoder_configs.HF_DATASET_ID)
 
     all_records = []
     for split_name in ("color", "size"):
@@ -137,35 +113,22 @@ def _run_dataset_setup() -> None:
 
     print(f"\nTotal samples: {len(all_records)}")
     print("Building train/val splits for crosscoder ...")
-    out_ds = _build_dataset_dict(all_records, val_fraction=VAL_FRACTION, seed=RANDOM_SEED)
+    out_ds = _build_dataset_dict(all_records, val_fraction=crosscoder_configs.VAL_FRACTION, seed=crosscoder_configs.RANDOM_SEED)
 
-    COUNTERFACT_SELECTED_DIR.parent.mkdir(parents=True, exist_ok=True)
-    out_path = str(COUNTERFACT_SELECTED_DIR)
+    crosscoder_configs.COUNTERFACT_SELECTED_DIR.parent.mkdir(parents=True, exist_ok=True)
+    out_path = str(crosscoder_configs.COUNTERFACT_SELECTED_DIR)
     print(f"Saving to {out_path} ...")
     out_ds.save_to_disk(out_path)
     print("Done. Dataset is at:", out_path)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Download Visual-Counterfact dataset and compressed models from HF for crosscoder."
-    )
-    parser.add_argument(
-        "--dataset-only",
-        action="store_true",
-        help="Only download and prepare the dataset; skip compressed models.",
-    )
-    parser.add_argument(
-        "--models-only",
-        action="store_true",
-        help="Only download compressed models; skip the dataset.",
-    )
-    parser.add_argument(
-        "--models-repo",
-        type=str,
-        default=HF_COMPRESSED_MODELS_REPO,
-        help=f"HuggingFace repo ID for compressed models (default: {HF_COMPRESSED_MODELS_REPO}).",
-    )
+    parser = argparse.ArgumentParser(description="Download Visual-Counterfact dataset and compressed models from HF for crosscoder.")
+    parser.add_argument("--dataset-only", action="store_true", help="Only download and prepare the dataset")
+    parser.add_argument( "--models-only", action="store_true", help="Only download compressed models")
+    parser.add_argument("--models-repo", type=str,
+                        default=crosscoder_configs.HF_COMPRESSED_MODELS_REPO,
+                        help=f"HuggingFace repo ID for compressed models (default: {crosscoder_configs.HF_COMPRESSED_MODELS_REPO}).")
     args = parser.parse_args()
 
     do_dataset = not args.models_only
@@ -174,7 +137,7 @@ def main() -> None:
     if do_dataset:
         _run_dataset_setup()
     if do_models:
-        _download_compressed_models(args.models_repo, COMPRESSED_MODELS_DIR)
+        _download_compressed_models(args.models_repo, crosscoder_configs.COMPRESSED_MODELS_DIR)
 
     if do_dataset and do_models:
         print("\nCrosscoder expects: output/counterfactual_selected and src/compressed_models/")
