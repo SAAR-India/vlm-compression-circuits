@@ -52,11 +52,7 @@ AWQ_CALIBRATION_SAMPLES = 256
 
 BLIP_VQA_MODEL_ID = "Salesforce/blip-vqa-base"
 QWEN3VL_2B_MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
-<<<<<<< master
 LLAVA_V1_5_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
-=======
-LLAVA15_7B_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
->>>>>>> main
 
 MODULE_MAP = {
     "blip2": {
