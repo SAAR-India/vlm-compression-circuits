@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from preprocessing.config import BLIP_VQA_MODEL_ID, LLAVA15_7B_MODEL_ID, QWEN3VL_2B_MODEL_ID
 
 # Print first N samples per dataset (input, prediction, ground truth) for format debugging
@@ -6,10 +8,34 @@ DEBUG_EVAL_SAMPLES = 5
 COMP_V = "vision"
 COMP_P = "projector"
 
-METHODS = ["wanda", "awq"]
+METHODS = ["wanda", "awq", "sparsegpt", "gptq", "smoothquant"]
 METHOD_CONFIGS = {
     "wanda": {"sparsity_ratio": 0.5, "sparsity_type": "unstructured"},
     "awq":   {"w_bit": 4, "q_group_size": 128},
+    "sparsegpt": {
+        "sparsity_ratio": 0.5,
+        "sparsity_type": "unstructured",
+        "calib_samples": 128,
+        "calib_batch_size": 4,
+        "block_size": 128,
+        "percdamp": 0.01,
+    },
+    "gptq": {
+        "w_bit": 4,
+        "q_group_size": 128,
+        "calib_samples": 128,
+        "calib_batch_size": 4,
+        "block_size": 128,
+        "percdamp": 0.01,
+        "symmetric": False,
+    },
+    "smoothquant": {
+        "w_bit": 8,
+        "a_bit": 8,
+        "alpha": 0.5,
+        "calib_samples": 128,
+        "calib_batch_size": 4,
+    },
 }
 
 QVLM_MODULE_MAP = {
@@ -72,6 +98,7 @@ MODEL_CONFIGS = {
     },
 }
 
-OUTPUT_DIR  = "./compressed_models"
-RESULTS_DIR = "./eval_results"
-LOG_FILE    = "./pipeline_log.json"
+SRC_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = str(SRC_DIR / "compressed_models")
+RESULTS_DIR = str(SRC_DIR / "eval_results")
+LOG_FILE = str(SRC_DIR / "pipeline_log.json")

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
-This script runs vision + projector compression (Wanda, AWQ/INT4) for BLIP-VQA, Qwen3-VL-2B, 
-and LLaVA-1.5-7B. Q-VLM can be found in the src/qvlm_compression/ directory.
+This script runs vision + projector compression (Wanda, AWQ/INT4,
+SparseGPT, GPTQ, and SmoothQuant) for BLIP-VQA, Qwen3-VL-2B, and
+LLaVA-1.5-7B. Q-VLM can be found in the src/qvlm_compression/ directory.
 
 Usage:
     python src/run_compression_eval.py --stage compress
@@ -16,13 +17,18 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+# Support both ``python src/run_compression_eval.py`` and
+# ``python -m src.run_compression_eval``.
+_SRC_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _SRC_DIR.parent
+for _import_path in (_SRC_DIR, _PROJECT_ROOT):
+    if str(_import_path) not in sys.path:
+        sys.path.insert(0, str(_import_path))
+
 import torch
 
 import compression_utils
 import compression_configs
-
-# Model IDs from preprocessing/config.py
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Compression: WANDA
 def apply_wanda(model, model_name: str, components: List[str], config: dict):
@@ -232,7 +238,9 @@ def main():
     if args.stage in ("compress", "all"):
         compression_utils.run_compression(quick=args.quick)
     if args.stage in ("eval", "all"):
-        compression_utils.run_evaluation(quick=args.quick, batch_size=args.batch_size)
+        from model_evals import run_evaluation
+
+        run_evaluation(quick=args.quick, batch_size=args.batch_size)
     if args.stage in ("table", "all"):
         compression_utils.generate_table()
 

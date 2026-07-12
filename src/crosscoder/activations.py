@@ -1,10 +1,8 @@
 import json
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 from PIL import Image
-from safetensors.torch import load_file
 from tqdm import tqdm
 from transformers import (
     AutoProcessor,
@@ -14,75 +12,16 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
+try:
+    from compression_checkpoints import converted_state_dict, restore_compression_runtime
+except ModuleNotFoundError:
+    from src.compression_checkpoints import converted_state_dict, restore_compression_runtime
 from . import config
 from .dataset import VisualCounterfactDataset
 from .utils import flush_gpu, get_device, get_compressed_model_path, set_seed
 
 # Qwen3-VL: use apply_chat_template(..., tokenize=True) so image tokens are correctly inserted (aligned with preprocessing/blip_visual_counterfact.py).
 _DTYPE = torch.float16
-
-
-def _load_state_dict_from_checkpoint(checkpoint_path: Path) -> Dict[str, torch.Tensor]:
-    """
-    Load model state dict from checkpoint. Supports:
-    - Single file: checkpoint_path / "model.safetensors"
-    - Sharded: checkpoint_path / "model.safetensors.index.json" with weight_map pointing to
-      shard files (e.g. model-00001-of-00002.safetensors). All shards are loaded and merged.
-    """
-    single_file = checkpoint_path / "model.safetensors"
-    index_file = checkpoint_path / "model.safetensors.index.json"
-    if single_file.exists():
-        return load_file(single_file)
-    if index_file.exists():
-        with open(index_file) as f:
-            index = json.load(f)
-        weight_map = index.get("weight_map", {})
-        shard_files = sorted(set(weight_map.values()))
-        state_dict = {}
-        for shard_name in shard_files:
-            shard_path = checkpoint_path / shard_name
-            state_dict.update(load_file(shard_path))
-        return state_dict
-    raise FileNotFoundError(
-        f"No safetensors found under {checkpoint_path}: "
-        "expected either 'model.safetensors' or 'model.safetensors.index.json' with shard files."
-    )
-
-
-def _unpack_int4(packed: torch.Tensor) -> torch.Tensor:
-    out_f, in_packed = packed.shape
-    w_q = torch.zeros((out_f, in_packed * 8), dtype=torch.int32, device=packed.device)
-    for k in range(8):
-        w_q[:, k::8] = (packed >> (k * 4)) & 0xF
-    return w_q
-
-
-def _awq_state_dict_to_fp16(
-    state_dict: Dict[str, torch.Tensor],
-    quantized_layers: List[str],
-    group_size: int,
-) -> Dict[str, torch.Tensor]:
-    out = {k: v.clone() for k, v in state_dict.items() 
-           if not k.endswith(".qweight") and not k.endswith(".scales") and not k.endswith(".zeros")}
-    for full_key in quantized_layers:
-        qkey = f"{full_key}.qweight"
-        skey = f"{full_key}.scales"
-        zkey = f"{full_key}.zeros"
-        if qkey not in state_dict:
-            continue
-        packed = state_dict[qkey]
-        scales = state_dict[skey]
-        zeros = state_dict[zkey]
-        out_f, in_packed = packed.shape
-        if zeros.ndim == 3:
-            zeros = zeros.squeeze(-1)
-        n_groups = scales.shape[1]
-        w_q = _unpack_int4(packed)
-        scales_exp = scales.repeat_interleave(group_size, dim=1)
-        zeros_exp = zeros.repeat_interleave(group_size, dim=1)
-        w_fp = (w_q.float() - zeros_exp.float()) * scales_exp
-        out[f"{full_key}.weight"] = w_fp.to(torch.float16)
-    return out
 
 
 def _qwen_inputs_for_sample(processor, image: Image.Image, question: str, device):
@@ -127,7 +66,7 @@ def load_uncompressed_model(model_name: str) -> Tuple:
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
-    elif model_name == "llava":
+    elif model_name == "llava15":
         model = LlavaForConditionalGeneration.from_pretrained(
             config.LLAVA_V1_5_7B_MODEL_ID,
             torch_dtype=torch.float16,
@@ -151,12 +90,7 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
     with open(checkpoint_path / "config.json") as f:
         model_config = json.load(f)
 
-    state_dict = _load_state_dict_from_checkpoint(checkpoint_path)
-    
-    if method == "awq":
-        quantized_layers = model_config.get("quantized_layers", [])
-        group_size = model_config.get("quantization_config", {}).get("group_size", 128)
-        state_dict = _awq_state_dict_to_fp16(state_dict, quantized_layers, group_size)
+    state_dict = converted_state_dict(checkpoint_path, model_config)
     
     if model_name == "blip2":
         model = BlipForQuestionAnswering.from_pretrained(
@@ -178,7 +112,7 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
         processor = AutoProcessor.from_pretrained(config.QWEN3VL_2B_MODEL_ID)
         if hasattr(processor, "tokenizer") and processor.tokenizer is not None:
             processor.tokenizer.padding_side = "left"
-    elif model_name == "llava":
+    elif model_name == "llava15":
         model = LlavaForConditionalGeneration.from_pretrained(
             config.LLAVA_V1_5_7B_MODEL_ID,
             torch_dtype=torch.float16,
@@ -192,6 +126,12 @@ def load_compressed_model(model_name: str, method: str, component: str) -> Tuple
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
+    restore_compression_runtime(
+        model,
+        checkpoint_path,
+        method=method,
+        config=model_config,
+    )
     model.eval()
     return model, processor
 

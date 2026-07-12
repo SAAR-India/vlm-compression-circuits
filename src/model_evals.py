@@ -14,8 +14,12 @@ import torch
 
 import compression_utils
 import compression_configs
+from compression_checkpoints import (
+    checkpoint_method,
+    converted_state_dict,
+    restore_compression_runtime,
+)
 from eval_ai_processor import EvalAIAnswerProcessor
-from run_compression_eval import _awq_state_dict_to_fp16
 
 
 # Dataset configs: HF repo, split, and how to extract question/answer/image.
@@ -263,13 +267,7 @@ def _load_eval_data(ds_cfg: dict, limit: int):
 
 def _is_awq_checkpoint(model_path: str) -> bool:
     """Return True if checkpoint has quantization_config.quant_method == 'awq'."""
-    config_path = os.path.join(model_path, "config.json")
-    if not os.path.isfile(config_path):
-        return False
-    with open(config_path) as f:
-        config = json.load(f)
-    qc = config.get("quantization_config") or {}
-    return qc.get("quant_method") == "awq"
+    return checkpoint_method(model_path) == "awq"
 
 
 def load_model_and_processor_for_eval(model_name: str, model_path: str, device_map: str) -> tuple:
@@ -279,14 +277,10 @@ def load_model_and_processor_for_eval(model_name: str, model_path: str, device_m
     Returns (model, processor, build_prompt_fn).
     """
     if _is_awq_checkpoint(model_path):
-        from safetensors.torch import load_file
         with open(os.path.join(model_path, "config.json")) as f:
             config = json.load(f)
         base_model_id = config.get("base_model_id") or compression_configs.MODEL_CONFIGS[model_name]["model_id"]
-        quantized_layers = config.get("quantized_layers", [])
-        group_size = (config.get("quantization_config") or {}).get("group_size", 128)
-        state_dict = load_file(os.path.join(model_path, "model.safetensors"))
-        converted = _awq_state_dict_to_fp16(state_dict, quantized_layers, group_size)
+        converted = converted_state_dict(model_path, config)
         if model_name == "blip2":
             from transformers import BlipForQuestionAnswering, BlipProcessor
             model = BlipForQuestionAnswering.from_pretrained(
@@ -345,6 +339,11 @@ def load_model_and_processor_for_eval(model_name: str, model_path: str, device_m
         build_prompt = build_prompt_qwen3vl
     if model_name in {"qwen3vl", "llava15"}:
         processor.tokenizer.padding_side = "left"  # decoder-only: correct batched generation
+    restore_compression_runtime(
+        model,
+        model_path,
+        method=checkpoint_method(model_path),
+    )
     return model, processor, build_prompt
 
 
@@ -358,6 +357,55 @@ def _run_batch_inference(model, processor, device, model_name: str,
     """
     if not batch_items:
         return []
+
+    if model_name == "qwen3vl":
+        predictions = []
+        for _, prompt, image, _ in batch_items:
+            text = prompt
+            if text.startswith("USER: <image>\n"):
+                text = text[len("USER: <image>\n"):]
+            if text.endswith("\nASSISTANT:"):
+                text = text[:-len("\nASSISTANT:")]
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image.convert("RGB")},
+                        {"type": "text", "text": text},
+                    ],
+                }
+            ]
+            inputs = processor.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=True,
+                return_tensors="pt",
+            )
+            inputs.pop("token_type_ids", None)
+            inputs = {
+                key: (
+                    value.to(device=device, dtype=torch.float16)
+                    if value.is_floating_point()
+                    else value.to(device)
+                )
+                for key, value in inputs.items()
+            }
+            input_len = inputs["input_ids"].shape[1]
+            output = model.generate(
+                **inputs,
+                max_new_tokens=50,
+                do_sample=False,
+                return_dict_in_generate=True,
+            )
+            generated = output.sequences[0, input_len:]
+            predictions.append(
+                processor.tokenizer.decode(
+                    generated, skip_special_tokens=True
+                ).strip()
+            )
+        return predictions
+
     images = [item[2] for item in batch_items]
     prompts = [item[1] for item in batch_items]
 

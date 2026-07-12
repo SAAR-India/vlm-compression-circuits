@@ -8,7 +8,10 @@ import csv
 from pathlib import Path
 
 from . import config
-from .activations import extract_activations_for_config
+from .activations import (
+    extract_activations_for_config,
+    extract_activations_for_vp_config,
+)
 from .utils import (
     get_activations_dir,
     get_metrics_dir,
@@ -21,7 +24,7 @@ from .train import train_crosscoder
 
 # Sweep config (rest from config.py)
 SWEEP_MODELS = ["qwen3vl", "blip2"]
-SWEEP_METHODS = ["wanda", "awq"]
+SWEEP_METHODS = list(config.METHODS)
 SWEEP_COMPONENTS = ["V_P"]
 SWEEP_TOKEN_TYPE = "cls"
 SWEEP_EXPANSION_FACTORS = [4, 8]
@@ -32,16 +35,27 @@ RESULTS_SWEEP_DIR = config.CROSSCODER_RESULTS_DIR / "results_sweep"
 
 
 def _ensure_activations(model: str, method: str, component: str, token_type: str) -> Path:
-    """Extract activations if missing; return path to activations.pt."""
+    """Extract activations if missing; return the training activation artifact."""
     results_dir = get_results_dir(model, method, component, token_type)
     activations_dir = get_activations_dir(results_dir)
-    activations_path = activations_dir / "activations.pt"
+    activations_path = (
+        activations_dir / "activations_V.pt"
+        if component == "V_P"
+        else activations_dir / "activations.pt"
+    )
     if activations_path.exists():
         return activations_path
     print(f"Extracting activations: {model}/{method}/{component}/{token_type}")
-    activations_data = extract_activations_for_config(model, method, component, token_type)
     activations_dir.mkdir(parents=True, exist_ok=True)
-    save_activations(activations_data, activations_path)
+    if component == "V_P":
+        vision_data, projector_data = extract_activations_for_vp_config(model, method)
+        save_activations(vision_data, activations_dir / "activations_V.pt")
+        save_activations(projector_data, activations_dir / "activations_P.pt")
+    else:
+        activations_data = extract_activations_for_config(
+            model, method, component, token_type
+        )
+        save_activations(activations_data, activations_path)
     return activations_path
 
 

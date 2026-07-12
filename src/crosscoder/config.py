@@ -90,6 +90,6 @@ ACTIVATION_DIM = {
 }
 
 MODELS = ["blip2", "qwen3vl", "llava15"]
-METHODS = ["wanda", "awq"]
+METHODS = ["wanda", "awq", "sparsegpt", "gptq", "smoothquant"]
 COMPONENTS = ["V", "P", "V_P"]
 TOKEN_TYPES = ["cls", "patch"]

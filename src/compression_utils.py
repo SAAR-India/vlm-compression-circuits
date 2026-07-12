@@ -10,8 +10,13 @@ import pandas as pd
 from tabulate import tabulate
 
 import compression_configs
-from model_evals import EVAL_DATASETS
-from run_compression_eval import apply_wanda, build_awq_state_dict, save_awq_checkpoint
+from compression_calibration import collect_calibration_stats
+from compression_checkpoints import save_smoothquant_scales
+from compression_methods import (
+    ActivationScaleCollector,
+    SecondOrderCompressor,
+    smoothquant_weight,
+)
 
 def get_submodule(model, dotted_path: str):
     """Safely traverse a dot-separated path like 'model.vision_tower'."""
@@ -122,6 +127,57 @@ def load_model(model_name: str):
     return model, processor
 
 
+def _save_standard_checkpoint(
+    opath: str,
+    model,
+    processor,
+    model_name: str,
+    method: str,
+    components: List[str],
+    comp_label: str,
+    paths: List[str],
+    method_config: dict,
+    smoothquant_scales: dict | None = None,
+) -> None:
+    """Save a normal HF checkpoint plus the pipeline's stable metadata."""
+    if method == "smoothquant":
+        model.config.compression_config = {
+            "method": method,
+            "weight_bits": method_config["w_bit"],
+            "activation_bits": method_config["a_bit"],
+            "alpha": method_config["alpha"],
+            "runtime": "fake_quant",
+        }
+    elif method == "gptq":
+        model.config.compression_config = {
+            "method": method,
+            "bits": method_config["w_bit"],
+            "group_size": method_config["q_group_size"],
+            "runtime": "dequantized_weights",
+        }
+    elif method == "sparsegpt":
+        model.config.compression_config = {
+            "method": method,
+            "sparsity_ratio": method_config["sparsity_ratio"],
+        }
+
+    model.save_pretrained(opath, max_shard_size="2GB")
+    processor.save_pretrained(opath)
+    if smoothquant_scales is not None:
+        save_smoothquant_scales(opath, smoothquant_scales)
+
+    meta = {
+        "model": model_name,
+        "method": method,
+        "components": components,
+        "comp_label": comp_label,
+        "config": method_config,
+        "module_paths": paths,
+    }
+    with open(os.path.join(opath, "meta.json"), "w") as handle:
+        json.dump(meta, handle, indent=2)
+
+
 def run_compression(quick: bool = False):
     os.makedirs(compression_configs.OUTPUT_DIR, exist_ok=True)
     log = load_log()
@@ -160,6 +216,8 @@ def run_compression(quick: bool = False):
                     print(f"  Pre:  {comp} ({path}): {total_p/1e6:.1f}M params")
 
                 if method == "wanda":
+                    from run_compression_eval import apply_wanda
+
                     model = apply_wanda(model, model_name, components,
                                        compression_configs.METHOD_CONFIGS[method])
                     for comp, path in zip(components, paths):
@@ -178,6 +236,8 @@ def run_compression(quick: bool = False):
                     with open(os.path.join(opath, "meta.json"), "w") as f:
                         json.dump(meta, f, indent=2)
                 elif method == "awq":
+                    from run_compression_eval import build_awq_state_dict, save_awq_checkpoint
+
                     print(f"  Building AWQ state dict (packed INT4 + scale/zero_point)...")
                     state_dict, quantized_layers = build_awq_state_dict(
                         model, model_name, components, compression_configs.METHOD_CONFIGS[method]
@@ -197,6 +257,94 @@ def run_compression(quick: bool = False):
                         paths,
                         compression_configs.METHOD_CONFIGS[method],
                     )
+                elif method in {"sparsegpt", "gptq", "smoothquant"}:
+                    method_config = compression_configs.METHOD_CONFIGS[method]
+                    calibration_mode = (
+                        "activation_scale"
+                        if method == "smoothquant"
+                        else "second_order"
+                    )
+                    print(
+                        f"  Calibrating {method} with "
+                        f"{method_config['calib_samples']} multimodal samples..."
+                    )
+                    stats = collect_calibration_stats(
+                        model=model,
+                        processor=processor,
+                        model_name=model_name,
+                        module_paths=paths,
+                        mode=calibration_mode,
+                        num_samples=method_config["calib_samples"],
+                        batch_size=method_config["calib_batch_size"],
+                    )
+
+                    smoothquant_scales = None
+                    if method == "sparsegpt":
+                        for layer_name, compressor in stats.items():
+                            if not isinstance(compressor, SecondOrderCompressor):
+                                raise TypeError(f"Invalid SparseGPT stats for {layer_name}")
+                            compressor.prune_sparsegpt(
+                                sparsity=method_config["sparsity_ratio"],
+                                blocksize=method_config["block_size"],
+                                percdamp=method_config["percdamp"],
+                            )
+                            compressor.free()
+                        for comp, path in zip(components, paths):
+                            total_p, nz = count_params(model, path)
+                            sparsity = 1.0 - (nz / total_p) if total_p else 0
+                            print(
+                                f"  Post: {comp} ({path}): "
+                                f"{nz/1e6:.1f}M nonzero, {sparsity:.1%} sparse"
+                            )
+                    elif method == "gptq":
+                        for layer_name, compressor in stats.items():
+                            if not isinstance(compressor, SecondOrderCompressor):
+                                raise TypeError(f"Invalid GPTQ stats for {layer_name}")
+                            compressor.quantize_gptq(
+                                bits=method_config["w_bit"],
+                                group_size=method_config["q_group_size"],
+                                blocksize=method_config["block_size"],
+                                percdamp=method_config["percdamp"],
+                                symmetric=method_config["symmetric"],
+                            )
+                            compressor.free()
+                        print(
+                            f"  Post: {len(stats)} Linear layer(s) GPTQ fake-quantized "
+                            f"to {method_config['w_bit']} bits"
+                        )
+                    else:
+                        smoothquant_scales = {}
+                        named_modules = dict(model.named_modules())
+                        for layer_name, collector in stats.items():
+                            if not isinstance(collector, ActivationScaleCollector):
+                                raise TypeError(
+                                    f"Invalid SmoothQuant stats for {layer_name}"
+                                )
+                            smoothquant_scales[layer_name] = smoothquant_weight(
+                                named_modules[layer_name],
+                                collector.amax,
+                                alpha=method_config["alpha"],
+                                weight_bits=method_config["w_bit"],
+                            )
+                        print(
+                            f"  Post: {len(stats)} Linear layer(s) prepared for "
+                            f"W{method_config['w_bit']}A{method_config['a_bit']} fake quant"
+                        )
+
+                    print(f"  Saving to {opath}...")
+                    _save_standard_checkpoint(
+                        opath=opath,
+                        model=model,
+                        processor=processor,
+                        model_name=model_name,
+                        method=method,
+                        components=components,
+                        comp_label=comp_label,
+                        paths=paths,
+                        method_config=method_config,
+                        smoothquant_scales=smoothquant_scales,
+                    )
+                    del stats
 
                 del model, processor
                 flush_gpu()
@@ -265,12 +413,14 @@ def generate_table():
 
 
 def _template():
+    from model_evals import EVAL_DATASETS
+
     header = ["Model", "Method", "Components"]
-    header += list(compression_configs.EVAL_DATASETS.keys())
+    header += list(EVAL_DATASETS.keys())
     rows = []
     for model in ["blip2", "qwen3vl", "llava15"]:
         rows.append([model, "FP16", "—"] + ["—"] * len(EVAL_DATASETS))
-        for method in ["wanda", "awq"]:
+        for method in compression_configs.METHODS:
             for comp in ["V", "V_P"]:
                 rows.append([model, method, comp] + ["—"] * len(EVAL_DATASETS))
         rows.append([""] * (3 + len(EVAL_DATASETS)))
