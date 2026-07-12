@@ -1,7 +1,5 @@
 """
-Download the Visual-Counterfact dataset from HuggingFace and save it to disk
-in the format expected by load_sources.py and config.py.
-
+Download the Visual-Counterfact dataset from HuggingFace and save it to disk.
 Dataset: https://huggingface.co/datasets/mgolov/Visual-Counterfact
 Output: data/Visual-Counterfact/ (DatasetDict with "color" and "size" splits)
 
@@ -29,7 +27,6 @@ def main():
     out_path = str(VISUAL_COUNTERFACT_DIR)
     print(f"\nSaving to {out_path} ...")
     ds_dict.save_to_disk(out_path)
-
     print("Done. Visual-Counterfact is ready for load_sources.py.")
 
 
